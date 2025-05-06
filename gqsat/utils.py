@@ -108,6 +108,12 @@ def add_common_options(parser):
         type=str,
         help="If not empty, defines the directory to save the wallclock time performance",
     )
+    parser.add_argument(
+        "--action-pool-size",
+        type=int,
+        default=0,
+        help="Capacity of action pool, only used in evaluation/test mode",
+    )
 
 
 def build_eval_argparser():
@@ -493,7 +499,8 @@ def evaluate(agent, args, include_train_set=False):
         with torch.no_grad(): # 使用 torch.no_grad() 节省内存
             while eval_env.test_to != 0 or pr == 0: # 循环直到完成所有测试问题
                 p_st_time = time.time() # 记录单个问题的开始时间
-                #added by cl reset 中不传参，在创建环境时设置最大决策次数
+        #added by cl reset 中不传参，在创建环境时设置最大决策次数
+        #added by cl reset 中不传参，在创建环境时设置最大决策次数
                 obs = eval_env.reset()
                 #added by cl
                 done = eval_env.isSolved

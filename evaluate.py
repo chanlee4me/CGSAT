@@ -117,7 +117,7 @@ if __name__ == "__main__":
     # 记录评估参数
     log_print(log_file, "\nEvaluation parameters:")
     for k, v in vars(args).items():
-        if k in ["eval_problems_paths", "test_time_max_decisions_allowed", "core_steps", "eps_final", "eval_time_limit"]:
+        if k in ["eval_problems_paths", "test_time_max_decisions_allowed", "core_steps", "eps_final", "eval_time_limit", "action_pool_size"]:
             log_print(log_file, f"  {k}: {v}")
     
     # 关闭日志文件

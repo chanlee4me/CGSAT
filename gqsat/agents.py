@@ -15,6 +15,7 @@
 import torch
 import numpy as np
 from minisat.minisat.gym.MiniSATEnv import VAR_ID_IDX
+from collections import deque
 
 
 # 抽象基类，定义了智能体应该实现的接口
@@ -67,6 +68,10 @@ class GraphAgent:
         self.device = args.device   # args.device 表示设备（CPU 或 GPU）
         self.debug = args.debug     # args.debug 表示是否开启调试模式
         self.qs_buffer = []
+        # action pool settings
+        self.pool_enabled = hasattr(args, 'action_pool_size') and args.action_pool_size > 0
+        self.pool_size = args.action_pool_size if self.pool_enabled else 0
+        self.action_pool = deque()
 
     # 将历史数据（hist_buffer）传入神经网络进行前向计算，输出每个节点的 Q 值
     def forward(self, hist_buffer):
@@ -87,15 +92,40 @@ class GraphAgent:
 
     # 根据 epsilon-greedy 策略决定智能体采取的动作
     def act(self, hist_buffer, eps):
-        # 如果一个随机数小于 eps，则随机选择一个动作
+        # If action pool enabled (only in evaluation), try pool
+        if self.pool_enabled:
+            # refill pool if empty
+            if not self.action_pool:
+                qs = self.forward(hist_buffer)
+                flat_qs = qs.flatten()
+                # get top-K actions
+                topk = torch.topk(flat_qs, min(self.pool_size, flat_qs.numel())).indices.tolist()
+                self.action_pool = deque(topk)
+            # pop and return first valid action
+            while self.action_pool:
+                action = self.action_pool.popleft()
+                if self._check_valid(hist_buffer[-1], action):
+                    return int(action)
+            # if pool exhausted or no valid actions, fall through to default
+        # epsilon-greedy fallback
         if np.random.random() < eps:
             vars_to_decide = np.where(hist_buffer[-1][0][:, VAR_ID_IDX] == 1)[0]
             acts = [a for v in vars_to_decide for a in (v * 2, v * 2 + 1)]
             return int(np.random.choice(acts))
-        # 否则，使用神经网络计算 Q 值，并选择最大 Q 值对应的动作
         else:
             qs = self.forward(hist_buffer)
             return self.choose_actions(qs)
+
+    def _check_valid(self, obs, action):
+        # Map flat action to variable index and check if variable still unassigned
+        # obs[0] is vertex features array; VAR_ID_IDX marks variable nodes
+        vfeat = obs[0]
+        # determine current variable nodes
+        var_mask = vfeat[:, VAR_ID_IDX] == 1
+        # number of variables available
+        num_vars = int(np.sum(var_mask))
+        var_idx = action // 2
+        return 0 <= var_idx < num_vars
 
     def choose_actions(self, qs):
         return qs.flatten().argmax().item()

@@ -21,5 +21,6 @@ python3 evaluate.py \
   --no_restarts \
   --test_time_max_decisions_allowed 500 \
   --eval-problems-paths /4T/chenli/data/uf50-218/test \
-  --model-dir /4T/chenli/data/log/seed14_2025-02-23_18-06-52\
-  --model-checkpoint model_13000.chkp
+  --model-dir /4T/chenli/data/log/seed12_2025-02-23_18-06-52\
+  --model-checkpoint model_50010.chkp \
+  --action-pool-size 2
