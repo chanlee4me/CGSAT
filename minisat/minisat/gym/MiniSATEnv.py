@@ -140,7 +140,7 @@ class gym_sat_Env(gym.Env):
             num_restarts,
             _,
         ) = self.S.getMetadata()
-        # 获取每个变量的赋值状态（2 表示未赋值）
+        # 从 MiniSAT 中获取每个变量的赋值状态（2 表示未赋值）
         var_assignments = self.S.getAssignments()
         
         num_var = sum([1 for el in var_assignments if el == 2])
@@ -158,7 +158,7 @@ class gym_sat_Env(gym.Env):
         ]
         # we need remapping since we keep only unassigned vars in the observations,
         # however, the environment does know about this, it expects proper indices of the variables
-        # 由于只保留未赋值变量，需要把原始变量索引映射到紧凑的 [0..num_var-1]
+        # （由于只保留未赋值变量）将原始变量下标映射到紧凑的 [0..num_unassigned-1]
         vars_remapping = {el: i for i, el in enumerate(valid_vars)}
         self.decision_to_var_mapping = {
             i: val_decision for i, val_decision in enumerate(valid_decisions)
@@ -173,6 +173,7 @@ class gym_sat_Env(gym.Env):
             # it might return an empty graph since we do not construct it when
             # step > max_cap and max_cap can be zero (all decisions are made by MiniSAT's VSIDS).
             empty_state = self.get_dummy_state()
+            # 紧凑动作索引 -> 原始字面量
             self.decision_to_var_mapping = {
                 el: el
                 for sl in range(empty_state[0].shape[0])
