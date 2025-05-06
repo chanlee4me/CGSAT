@@ -134,28 +134,28 @@ def get_mlp(
 class GraphNet(SatModel):
     def __init__(
         self,
-        in_dims,
-        out_dims,
-        independent=False,
-        save_name=None,
-        e2v_agg="sum",
-        n_hidden=1,
-        hidden_size=64,
-        activation=ReLU,
-        layer_norm=True,
+        in_dims,  # 输入维度元组(节点,边,全局)
+        out_dims,  # 输出维度元组(节点,边,全局)
+        independent=False,  # 是否独立处理各组件
+        save_name=None,  # 保存文件名
+        e2v_agg="sum",  # 边到节点的聚合方式
+        n_hidden=1,  # 隐藏层数量
+        hidden_size=64,  # 隐藏层大小
+        activation=ReLU,  # 激活函数
+        layer_norm=True,  # 是否使用层归一化
     ):
         super().__init__(save_name)
         self.e2v_agg = e2v_agg
         if e2v_agg not in ["sum", "mean"]:
             raise ValueError("Unknown aggregation function.")
 
-        v_in = in_dims[0]
-        e_in = in_dims[1]
-        u_in = in_dims[2]
+        v_in = in_dims[0]  # 节点输入维度
+        e_in = in_dims[1]  # 边输入维度
+        u_in = in_dims[2]  # 全局输入维度
 
-        v_out = out_dims[0]
-        e_out = out_dims[1]
-        u_out = out_dims[2]
+        v_out = out_dims[0]  # 节点输出维度
+        e_out = out_dims[1]  # 边输出维度
+        u_out = out_dims[2]  # 全局输出维度
 
         if independent:
             self.edge_mlp = get_mlp(
@@ -214,28 +214,29 @@ class GraphNet(SatModel):
             # source, target: [E, F_x], where E is the number of edges.
             # edge_attr: [E, F_e]
             if self.independent:
-                return self.edge_mlp(edge_attr)
-
+                return self.edge_mlp(edge_attr) # 独立模式仅处理边特征
+            # 依赖模式拼接源节点、目标节点、边和全局特征
             out = torch.cat([src, dest, edge_attr, u[e_indices]], 1)
             return self.edge_mlp(out)
         #added by cl 25-2-16
         # 修改node_model以适配新参数
         def node_model(x, edge_index, edge_attr, u, row, col, v_indices=None):
             if self.independent:
-                return self.node_mlp(x)
-            
+                return self.node_mlp(x) # 独立模式仅处理节点特征
+            # 根据聚合方式(求和或平均)聚合边信息
             # 使用传入的row进行聚合
             if self.e2v_agg == "sum":
                 agg_out = scatter_add(edge_attr, row, dim=0, dim_size=x.size(0))
             elif self.e2v_agg == "mean":
                 agg_out = scatter_mean(edge_attr, row, dim=0, dim_size=x.size(0))
-            
+            # 拼接节点特征、聚合边信息和全局特征
             out = torch.cat([x, agg_out, u[v_indices]], dim=1)
             return self.node_mlp(out)
 
         def global_model(x, edge_attr, u, v_indices, e_indices):
             if self.independent:
-                return self.global_mlp(u)
+                return self.global_mlp(u) # 独立模式仅处理全局特征
+            # 拼接全局特征、平均节点特征和平均边特征
             out = torch.cat(
                 [
                     u,
@@ -246,12 +247,13 @@ class GraphNet(SatModel):
             )
             return self.global_mlp(out)
         #added by cl 25-2-16 
-        #使用新的GraphNetwork替代ModifiedMetaLayer
+        #使用新的GraphNetwork替代ModifiedMetaLayer（# 使用GraphNetwork组合三个模型）
         self.op = GraphNetwork(edge_model, node_model, global_model)
 
     def forward(
         self, x, edge_index, edge_attr=None, u=None, v_indices=None, e_indices=None
     ):
+        # 前向传播:依次处理边、节点和全局特征
         return self.op(x, edge_index, edge_attr, u, v_indices, e_indices)
 
 # 图神经网络结构，包括编码器、核心和解码器三个部分。它可以用来处理图数据中的复杂变换。

@@ -41,10 +41,24 @@ def set_seed(seed):
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
 
+# 添加函数：同时打印到控制台和日志文件
+def log_print(log_file, message):
+    print(message)
+    log_file.write(message + "\n")
+
 if __name__ == "__main__":
     parser = build_eval_argparser()
     eval_args = parser.parse_args()
     set_seed(eval_args.seed)
+    
+    # 创建日志目录
+    if not os.path.exists(eval_args.logdir):
+        os.makedirs(eval_args.logdir)
+    
+    # 创建日志文件
+    log_filename = os.path.join(eval_args.logdir, f"evaluation_results_{time.strftime('%Y%m%d_%H%M%S')}.txt")
+    log_file = open(log_filename, "w")
+    
     with open(os.path.join(eval_args.model_dir, "status.yaml"), "r") as f:
         train_status = yaml.load(f, Loader=yaml.Loader)
         args = train_status["args"]
@@ -77,20 +91,36 @@ if __name__ == "__main__":
     scores, eval_metadata, _ = evaluate(agent, args)
     end_time = time.time()
 
-    print(
-        f"Evaluation is over. It took {end_time - st_time} seconds for the whole procedure"
-    )
+    # 保存评估结果到pickle文件
+    pickle_path = os.path.join(eval_args.logdir, "eval_results.pkl")
+    with open(pickle_path, "wb") as f:
+        pickle.dump(scores, f)
+        
+    # 记录模型信息
+    log_print(log_file, f"Model directory: {args.model_dir}")
+    log_print(log_file, f"Model checkpoint: {args.model_checkpoint}")
+    log_print(log_file, f"Evaluation is over. It took {end_time - st_time:.2f} seconds for the whole procedure")
+    
     highest_relative_score = -float('inf')
-    # with open("../eval_results.pkl", "wb") as f:
-    #     pickle.dump(scores, f)
 
+    # 记录详细结果
     for pset, pset_res in scores.items():
         res_list = [el for el in pset_res.values()]
-        print(f"Results for {pset}")
-        print(
-            f"median_relative_score: {np.nanmedian(res_list)}, mean_relative_score: {np.mean(res_list)}"
-        )
+        log_print(log_file, f"Results for {pset}")
+        log_print(log_file, f"median_relative_score: {np.nanmedian(res_list)}, mean_relative_score: {np.mean(res_list)}")
         # 更新最高relative_score
         highest_relative_score = max(highest_relative_score, np.nanmax(res_list))
+    
     # 输出最高的relative_score
-    print(f"Highest relative_score during evaluation: {highest_relative_score}")
+    log_print(log_file, f"Highest relative_score during evaluation: {highest_relative_score}")
+    
+    # 记录评估参数
+    log_print(log_file, "\nEvaluation parameters:")
+    for k, v in vars(args).items():
+        if k in ["eval_problems_paths", "test_time_max_decisions_allowed", "core_steps", "eps_final", "eval_time_limit"]:
+            log_print(log_file, f"  {k}: {v}")
+    
+    # 关闭日志文件
+    log_file.close()
+    
+    print(f"评估结果已保存到: {log_filename}")

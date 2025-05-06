@@ -289,7 +289,7 @@ if __name__ == "__main__":
         # 初始化回报 ret，并重置环境，检查环境是否已解决
         ret = 0
             # added by cl
-            # obs包括了4样东西： 顶点特征.边特征.边连接关系.全局特征s
+            # obs包括了4样东西： 顶点特征.边特征.边连接关系.全局特征
         obs = env.reset()
             # prev: obs = env.reset(args.train_time_max_decisions_allowed)
         done = env.isSolved
