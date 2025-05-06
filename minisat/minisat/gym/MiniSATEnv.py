@@ -131,7 +131,7 @@ class gym_sat_Env(gym.Env):
             return empty_state, True
 
         # S is not yet Done, parse and return real state
-
+        # 获取 MiniSAT 当前元数据：总变量数、深度、初始子句数、重启次数等
         (
             total_var,
             _,
@@ -140,21 +140,25 @@ class gym_sat_Env(gym.Env):
             num_restarts,
             _,
         ) = self.S.getMetadata()
+        # 获取每个变量的赋值状态（2 表示未赋值）
         var_assignments = self.S.getAssignments()
+        
         num_var = sum([1 for el in var_assignments if el == 2])
 
-        # only valid decisions
+        # 构造所有合法的决策（对于每个未赋值变量，有两个决策：正/负）
         valid_decisions = [
             el
             for i in range(len(var_assignments))
             for el in (2 * i, 2 * i + 1)
             if var_assignments[i] == 2
         ]
+        # 收集未赋值的变量索引
         valid_vars = [
             idx for idx in range(len(var_assignments)) if var_assignments[idx] == 2
         ]
         # we need remapping since we keep only unassigned vars in the observations,
         # however, the environment does know about this, it expects proper indices of the variables
+        # 由于只保留未赋值变量，需要把原始变量索引映射到紧凑的 [0..num_var-1]
         vars_remapping = {el: i for i, el in enumerate(valid_vars)}
         self.decision_to_var_mapping = {
             i: val_decision for i, val_decision in enumerate(valid_decisions)
