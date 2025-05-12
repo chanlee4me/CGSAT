@@ -36,6 +36,10 @@ from os.path import join, realpath, split
 from .GymSolver import GymSolver
 from gym import spaces
 import sys
+# 导入特征提取器
+import torch
+sys.path.append(realpath(join(split(realpath(__file__))[0], '../../../../')))
+from gqsat.cnf_features import CNFFeatureExtractor, is_horn_clause
 
 MINISAT_DECISION_CONSTANT = 32767
 VAR_ID_IDX = (
@@ -112,7 +116,13 @@ class gym_sat_Env(gym.Env):
         self.curr_problem = None # 程序运行中会被赋值为具体的问题对象或数据
 
         self.global_in_size = 1 # 全局数据的维度
-        self.vertex_in_size = 2 # 将顶点输入大小设置为 2，代表图结构中每个顶点的特征数量或输入维度。
+        # 更改变量和子句节点的特征维度
+        # 变量节点: 1(标识符) + 5(新特征) + 2(Q值预留位) = 8维
+        # 子句节点: 1(标识符) + 15(新特征) = 16维
+        self.vertex_in_size = 16 # 使用最大的特征维度，对于不适用的维度填充0
+        # 边特征维度:
+        # [0,1] 表示正文字边
+        # [1,0] 表示负文字边
         self.edge_in_size = 2  # 将边的输入大小设置为 2，说明在图结构中，每条边附带的特征有两个维度或数据项
         self.max_clause_len = 0 # 记录某个约束或表达式中最长子句的长度
 
@@ -209,9 +219,41 @@ class gym_sat_Env(gym.Env):
         vertex_data = np.zeros(
             (num_var + clause_counter, self.vertex_in_size), dtype=np.float32
         )  # both vars and clauses are vertex in the graph
-        vertex_data[:num_var, VAR_ID_IDX] = 1
-        vertex_data[num_var:, VAR_ID_IDX + 1] = 1
-
+        
+        # 设置节点类型标识符
+        vertex_data[:num_var, VAR_ID_IDX] = 1  # 变量节点
+        vertex_data[num_var:, VAR_ID_IDX + 1] = 1  # 子句节点
+        
+        # 使用我们的特征提取器计算特征
+        # 首先，需要将子句映射回原始格式(1到num_total_var的索引)
+        # 从当前的有效变量子集映射回原始变量索引
+        reverse_vars_remapping = {i: var_id for var_id, i in vars_remapping.items()}
+        
+        # 准备原始格式的子句列表
+        original_format_clauses = []
+        for clause in clauses:
+            original_clause = []
+            for lit in clause:
+                var_idx = reverse_vars_remapping[abs(lit) - 1]
+                original_lit = (var_idx + 1) if lit > 0 else -(var_idx + 1)
+                original_clause.append(original_lit)
+            original_format_clauses.append(original_clause)
+        
+        # 计算节点特征
+        feature_extractor = CNFFeatureExtractor(original_format_clauses, total_var)
+        
+        # 提取变量特征
+        var_features = feature_extractor.extract_var_features()
+        # 只为当前未赋值的变量设置特征
+        for i, var_idx in enumerate(valid_vars):
+            # 变量节点特征: 从索引1开始 (索引0是节点类型标识符)
+            vertex_data[i, 1:8] = var_features[var_idx]  # 包括5个CNF特征和2个Q值预留位
+            
+        # 提取子句特征
+        clause_features = feature_extractor.extract_clause_features()
+        # 为所有子句设置特征
+        vertex_data[num_var:, 1:16] = clause_features
+        
         return (
             (
                 vertex_data,
@@ -368,7 +410,11 @@ class gym_sat_Env(gym.Env):
 
     def get_dummy_state(self):
         DUMMY_V = np.zeros((2, self.vertex_in_size), dtype=np.float32)
-        DUMMY_V[:, VAR_ID_IDX] = 1
+        DUMMY_V[:, VAR_ID_IDX] = 1  # 设置为变量节点
+        # 设置一些虚拟特征值，防止模型出错
+        # 为虚拟变量节点填充有效的特征值 (5个CNF特征 + 2个Q值预留位)
+        DUMMY_V[:, 1:8] = np.array([0.5, 0.5, 1.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        
         DUMMY_STATE = (
             DUMMY_V,
             np.zeros((2, self.edge_in_size), dtype=np.float32),
