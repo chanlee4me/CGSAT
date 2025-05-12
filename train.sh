@@ -16,8 +16,8 @@ python3 dqn.py \
   --logdir /4T/chenli/data/log \
   --env-name sat-v0 \
   --nums-variable 50 \
-  --train-problems-paths /4T/chenli/data/uf50-218/train \
-  --eval-problems-paths /4T/chenli/data/uf50-218/validation \
+  --train-problems-paths /4T/chenli/data/flat75-180/train \
+  --eval-problems-paths /4T/chenli/data/flat100-239/validation \
   --lr 0.00002 \
   --bsize 64 \
   --buffer-size 20000 \
