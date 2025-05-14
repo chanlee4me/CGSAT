@@ -1,0 +1,3 @@
+- MiniSATEnv.py：：parse_state_as_graph()：self.S.getMetadata()这一句的内部实现是怎么样的？我如果想要 debug 该怎么做
+- MiniSATEnv.py：：self.S.getAssignments() 这一句的内部实现是怎么样的？
+- MiniSATEnv.py：：self.S.getAssignments()self.S.getClauses() 

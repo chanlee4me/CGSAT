@@ -49,9 +49,70 @@ class CNFFeatureExtractor:
         self.max_literals_in_clause = 50  # 可以根据实际数据调整
         self.pe_dim = 10
         
-        # 初始化位置嵌入层
-        self.literal_pos_embedding = torch.nn.Embedding(self.max_literals_in_clause, self.pe_dim)
-        
+        # 初始化位置嵌入层 - 注意：根据您的要求，位置编码将置0，但保留定义以备将来使用
+        # self.literal_pos_embedding = torch.nn.Embedding(self.max_literals_in_clause, self.pe_dim)
+
+        # 一次性计算并存储所有原始特征
+        self._precompute_all_features()
+
+    def _precompute_all_features(self):
+        """
+        预计算并存储所有变量和子句的特征。
+        """
+        # 预计算变量特征
+        var_features_list = []
+        for var_idx in range(self.num_vars):
+            features_var = np.zeros(7, dtype=np.float32) # 保持7维以兼容原有代码，Q值预留位在外部处理
+            features_var[0] = self.var_pos_occurrences[var_idx]
+            features_var[1] = self.var_neg_occurrences[var_idx]
+            features_var[2] = self.var_pos_occurrences[var_idx] / (self.var_neg_occurrences[var_idx] + 1.0)
+            if self.num_clauses > 0:
+                features_var[3] = self.var_in_horn[var_idx] / self.num_clauses
+            else:
+                features_var[3] = 0.0
+            
+            sum_inverse_clause_lengths = 0.0
+            for clause in self.clauses: # 仅使用原始子句计算
+                clause_length = len(clause)
+                if clause_length == 0:
+                    continue
+                if any(abs(lit) - 1 == var_idx for lit in clause):
+                    sum_inverse_clause_lengths += 1.0 / clause_length
+            features_var[4] = sum_inverse_clause_lengths
+            features_var[5:7] = 0.0 # Q值预留位
+            var_features_list.append(features_var)
+        self.precomputed_var_features = np.array(var_features_list, dtype=np.float32)
+
+        # 预计算子句特征
+        clause_features_list = []
+        for clause_idx, clause in enumerate(self.clauses):
+            clause_length = len(clause)
+            scalar_features = np.zeros(5, dtype=np.float32)
+            position_features = np.zeros(self.pe_dim, dtype=np.float32) # 位置编码置0
+
+            if self.num_vars > 0:
+                scalar_features[0] = clause_length / self.num_vars
+            else:
+                scalar_features[0] = 0.0
+            
+            scalar_features[1] = 1.0 if clause_length == 2 else 0.0
+            scalar_features[2] = 1.0 if clause_length == 3 else 0.0
+            scalar_features[3] = 1.0 if self.horn_clauses[clause_idx] else 0.0
+            
+            num_pos_lits = sum(1 for lit in clause if lit > 0)
+            num_neg_lits = sum(1 for lit in clause if lit < 0)
+            scalar_features[4] = num_pos_lits / (num_neg_lits + 1.0)
+            
+            # 位置编码特征直接置0
+            # if clause_length > 0 and hasattr(self, 'literal_pos_embedding'):
+            #     positions = torch.arange(min(clause_length, self.max_literals_in_clause))
+            #     embeddings = self.literal_pos_embedding(positions)
+            #     pe_vector = torch.mean(embeddings, dim=0).detach().numpy()
+            #     position_features = pe_vector
+                
+            clause_features_list.append(np.concatenate([scalar_features, position_features]))
+        self.precomputed_clause_features = np.array(clause_features_list, dtype=np.float32)
+
     def _count_var_occurrences(self, positive=True):
         """
         计算每个变量在子句中以正文字/负文字形式出现的次数
@@ -93,92 +154,62 @@ class CNFFeatureExtractor:
     
     def extract_var_features(self):
         """
-        为所有变量提取特征
+        为所有变量提取特征 (返回预计算的特征)
         
         Returns:
-            变量节点特征矩阵，形状为 [num_vars, 5]
+            变量节点特征矩阵，形状为 [num_vars, 7]
         """
-        features = np.zeros((self.num_vars, 7), dtype=np.float32)
-        
-        for var_idx in range(self.num_vars):
-            # 特征1: pos_lit_degree - 变量的正文字出现频率
-            features[var_idx, 0] = self.var_pos_occurrences[var_idx]
-            
-            # 特征2: neg_lit_degree - 变量的负文字出现频率
-            features[var_idx, 1] = self.var_neg_occurrences[var_idx]
-            
-            # 特征3: lit_pos_neg_ratio - (正文字出现次数) / (负文字出现次数 + 1)
-            features[var_idx, 2] = self.var_pos_occurrences[var_idx] / (self.var_neg_occurrences[var_idx] + 1.0)
-            
-            # 特征4: horn_occurrence - 变量出现在Horn子句的次数 / 总子句数
-            if self.num_clauses > 0:
-                features[var_idx, 3] = self.var_in_horn[var_idx] / self.num_clauses
-            else:
-                features[var_idx, 3] = 0.0
-                
-            # 特征5: clause_size_sum_inv - 所有含该变量的子句长度倒数之和
-            sum_inverse_clause_lengths = 0.0
-            for clause in self.clauses:
-                clause_length = len(clause)
-                if clause_length == 0:
-                    continue
-                    
-                # 检查变量是否出现在子句中(正文字或负文字)
-                if any(abs(lit) - 1 == var_idx for lit in clause):
-                    sum_inverse_clause_lengths += 1.0 / clause_length
-                    
-            features[var_idx, 4] = sum_inverse_clause_lengths
-            
-            # 特征6-7: 为Q值预留的位置 (初始值为0)
-            # Q值将由DQN模型计算并输出，这里只是预留位置
-            features[var_idx, 5:7] = 0.0
-            
-        return features
+        return self.precomputed_var_features
     
     def extract_clause_features(self):
         """
-        为所有子句提取特征
+        为所有原始子句提取特征 (返回预计算的特征)
         
         Returns:
             子句节点特征矩阵，形状为 [num_clauses, 15] (5个标量特征 + 10维位置编码)
         """
-        # 5个标量特征
-        scalar_features = np.zeros((self.num_clauses, 5), dtype=np.float32)
-        # 10维位置编码
-        position_features = np.zeros((self.num_clauses, 10), dtype=np.float32)
+        return self.precomputed_clause_features
+
+    def extract_features_for_new_clause(self, new_clause: list[int]):
+        """
+        为新生成的学习子句计算特征。
+        位置编码特征将置为0。
+        对于变量相关的统计特征（如 pos/neg occurrences, horn occurrences），
+        我们不能简单地更新全局统计量，因为这会影响原始问题的特征。
+        因此，对于新子句，某些基于全局统计的特征可能需要特殊处理或近似。
+        这里我们尝试计算其基本特征。
+
+        Args:
+            new_clause: 新学习到的子句，一个整数列表。
+
+        Returns:
+            新子句的特征向量，形状为 [15]
+        """
+        clause_length = len(new_clause)
+        scalar_features = np.zeros(5, dtype=np.float32)
+        position_features = np.zeros(self.pe_dim, dtype=np.float32) # 位置编码置0
+
+        # 特征1: clause_degree - 子句长度 / 变量总数
+        if self.num_vars > 0:
+            scalar_features[0] = clause_length / self.num_vars
+        else:
+            scalar_features[0] = 0.0
+            
+        # 特征2: is_binary - 二元子句标志 (0/1)
+        scalar_features[1] = 1.0 if clause_length == 2 else 0.0
         
-        for clause_idx, clause in enumerate(self.clauses):
-            clause_length = len(clause)
-            
-            # 特征1: clause_degree - 子句长度 / 变量总数
-            if self.num_vars > 0:
-                scalar_features[clause_idx, 0] = clause_length / self.num_vars
-            else:
-                scalar_features[clause_idx, 0] = 0.0
-                
-            # 特征2: is_binary - 二元子句标志 (0/1)
-            scalar_features[clause_idx, 1] = 1.0 if clause_length == 2 else 0.0
-            
-            # 特征3: is_ternary - 三元子句标志 (0/1)
-            scalar_features[clause_idx, 2] = 1.0 if clause_length == 3 else 0.0
-            
-            # 特征4: is_horn - Horn子句标志 (0/1)
-            scalar_features[clause_idx, 3] = 1.0 if self.horn_clauses[clause_idx] else 0.0
-            
-            # 特征5: clause_pos_neg_ratio - 子句内部正／负字面比例
-            num_pos_lits = sum(1 for lit in clause if lit > 0)
-            num_neg_lits = sum(1 for lit in clause if lit < 0)
-            scalar_features[clause_idx, 4] = num_pos_lits / (num_neg_lits + 1.0)
-            
-            # 特征6: clause_pe[0..9] - 10维位置编码
-            if clause_length > 0:
-                # 对于子句中的每个位置，获取其嵌入
-                positions = torch.arange(min(clause_length, self.max_literals_in_clause))
-                embeddings = self.literal_pos_embedding(positions)
-                # 计算平均池化得到最终的位置编码
-                pe_vector = torch.mean(embeddings, dim=0).detach().numpy()
-                position_features[clause_idx] = pe_vector
-                
-        # 合并标量特征和位置编码
-        features = np.concatenate([scalar_features, position_features], axis=1)
-        return features
+        # 特征3: is_ternary - 三元子句标志 (0/1)
+        scalar_features[2] = 1.0 if clause_length == 3 else 0.0
+        
+        # 特征4: is_horn - Horn子句标志 (0/1)
+        scalar_features[3] = 1.0 if is_horn_clause(new_clause) else 0.0
+        
+        # 特征5: clause_pos_neg_ratio - 子句内部正／负字面比例
+        num_pos_lits = sum(1 for lit in new_clause if lit > 0)
+        num_neg_lits = sum(1 for lit in new_clause if lit < 0)
+        scalar_features[4] = num_pos_lits / (num_neg_lits + 1.0)
+        
+        # 特征6: clause_pe[0..9] - 10维位置编码 (置0)
+        # position_features 已经初始化为0
+
+        return np.concatenate([scalar_features, position_features])

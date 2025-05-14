@@ -500,7 +500,6 @@ def evaluate(agent, args, include_train_set=False):
             while eval_env.test_to != 0 or pr == 0: # 循环直到完成所有测试问题
                 p_st_time = time.time() # 记录单个问题的开始时间
         #added by cl reset 中不传参，在创建环境时设置最大决策次数
-        #added by cl reset 中不传参，在创建环境时设置最大决策次数
                 obs = eval_env.reset()
                 #added by cl
                 done = eval_env.isSolved
