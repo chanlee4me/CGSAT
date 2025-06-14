@@ -2,8 +2,7 @@
 
 # Define the GPU allocation strategy
 GPUS=(0 1)  # Use two GPUs
-SEEDS=(11 12 13 14 15 25 26 27 28 29)  # 10 different seeds
-TASKS_PER_GPU=3  # Default: 5 tasks per GPU, can be modified as needed
+SEEDS=(11 12 13 14 15 25 26 27 28 29)  # 8 different seeds
 
 # Ensure the logs directory exists
 mkdir -p /4T/chenli/data/log/logs
@@ -58,39 +57,15 @@ BASE_CMD="--logdir /4T/chenli/data/log \
   --lr_scheduler_frequency 3000 \
   --independent_block_layers 0"
 
-# Launch tasks with dynamic allocation
+# Launch tasks (each GPU runs 4 tasks)
 for i in "${!SEEDS[@]}"; do
-    # Determine the GPU index based on TASKS_PER_GPU
-    GPU_IDX=$((i / TASKS_PER_GPU))
-    
-    # Skip if we've run out of GPUs
-    if [ $GPU_IDX -ge ${#GPUS[@]} ]; then
-        echo "Warning: Not enough GPUs for all seeds. Skipping seed ${SEEDS[$i]}."
-        continue
-    fi
-    
+    # Determine the GPU index (the first four seeds to GPU0, the rest to GPU1)
+    GPU_IDX=$((i / 5))
     SEED=${SEEDS[$i]}
 
-    # Run the training process with the current seed
+    # Run the training process with the current seed; the dqn.py script will create its own timestamped log subdirectory.
     CUDA_VISIBLE_DEVICES=${GPUS[$GPU_IDX]} \
     nohup python3 dqn.py $BASE_CMD --seed $SEED > /4T/chenli/data/log/logs/seed${SEED}.log 2>&1 &
-    
-    echo "Started task with seed ${SEED} on GPU ${GPUS[$GPU_IDX]}"
 done
 
-# Calculate how many tasks are assigned to each GPU for the summary
-declare -A TASKS_COUNT
-for i in "${!SEEDS[@]}"; do
-    GPU_IDX=$((i / TASKS_PER_GPU))
-    if [ $GPU_IDX -lt ${#GPUS[@]} ]; then
-        GPU=${GPUS[$GPU_IDX]}
-        TASKS_COUNT[$GPU]=$((${TASKS_COUNT[$GPU]:-0} + 1))
-    fi
-done
-
-# Print summary
-echo "Launched tasks with $TASKS_PER_GPU tasks per GPU:"
-for GPU in "${GPUS[@]}"; do
-    COUNT=${TASKS_COUNT[$GPU]:-0}
-    echo "  GPU $GPU: $COUNT tasks"
-done
+echo "Launched ${#SEEDS[@]} tasks. GPU0 runs seeds ${SEEDS[0]} - ${SEEDS[3]}, GPU1 runs seeds ${SEEDS[4]} - ${SEEDS[7]}."

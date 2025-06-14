@@ -1,0 +1,5 @@
+c This is a simple test CNF file for feature checking.
+c It has 3 variables and 2 clauses.
+p cnf 3 2
+1 -2 0
+2 3 0

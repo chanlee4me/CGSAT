@@ -1,0 +1,1 @@
+2025-06-08 16:23:47,616 - INFO - MiniSATEnv.py:174 - Initialized MiniSATEnv with vertex_in_size: 33, var_embedding_dim: 16, clause_embedding_dim: 16

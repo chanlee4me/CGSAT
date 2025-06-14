@@ -62,7 +62,7 @@ class CNFFeatureExtractor:
         # 预计算变量特征
         var_features_list = []
         for var_idx in range(self.num_vars):
-            features_var = np.zeros(7, dtype=np.float32) # 保持7维以兼容原有代码，Q值预留位在外部处理
+            features_var = np.zeros(5, dtype=np.float32) # 修改：移除为Q值预留的2个维度
             features_var[0] = self.var_pos_occurrences[var_idx]
             features_var[1] = self.var_neg_occurrences[var_idx]
             features_var[2] = self.var_pos_occurrences[var_idx] / (self.var_neg_occurrences[var_idx] + 1.0)
@@ -79,7 +79,7 @@ class CNFFeatureExtractor:
                 if any(abs(lit) - 1 == var_idx for lit in clause):
                     sum_inverse_clause_lengths += 1.0 / clause_length
             features_var[4] = sum_inverse_clause_lengths
-            features_var[5:7] = 0.0 # Q值预留位
+            # features_var[5:7] = 0.0 # Q值预留位 - 修改：移除此行
             var_features_list.append(features_var)
         self.precomputed_var_features = np.array(var_features_list, dtype=np.float32)
 
@@ -157,7 +157,7 @@ class CNFFeatureExtractor:
         为所有变量提取特征 (返回预计算的特征)
         
         Returns:
-            变量节点特征矩阵，形状为 [num_vars, 7]
+            变量节点特征矩阵，形状为 [num_vars, 5]
         """
         return self.precomputed_var_features
     

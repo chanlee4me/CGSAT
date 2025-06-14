@@ -42,11 +42,28 @@ sys.path.append(realpath(join(split(realpath(__file__))[0], '../../../../')))
 from gqsat.cnf_features import CNFFeatureExtractor, is_horn_clause
 
 MINISAT_DECISION_CONSTANT = 32767
-VAR_ID_IDX = (
-    0  # put 1 at the position of this index to indicate that the node is a variable
+# 特征列索引常量
+NODE_TYPE_COL = 0  # 节点类型所在列：1表示变量，2表示子句
+NODE_ID_COL = 1    # 节点原始ID所在列
+HANDCRAFTED_FEATURES_START_COL = 2 # 手工计算特征开始的列
+
+# 手工特征维度常量
+NUM_HANDCRAFTED_VAR_FEATURES = 5
+NUM_HANDCRAFTED_CLAUSE_FEATURES = 15
+
+# 节点类型常量
+NODE_TYPE_VAR = 1
+NODE_TYPE_CLAUSE = 2
+
+# VAR_ID_IDX 保留以便兼容旧的引用，但建议后续逐步替换为 NODE_TYPE_COL
+VAR_ID_IDX = NODE_TYPE_COL # put 1 at the position of this index to indicate that the node is a variable (for type identification)
+import logging # 添加 logging 模块导入
+logging.basicConfig(
+    level=logging.DEBUG, 
+    format='%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s',
+    filename='edge&node-feature.log',  # 指定日志文件名
+    filemode='w'  # 每次运行时覆盖日志文件
 )
-
-
 class gym_sat_Env(gym.Env):
     def __init__(
         self,
@@ -59,7 +76,9 @@ class gym_sat_Env(gym.Env):
         compare_with_restarts=None,
         max_data_limit_per_set=None,
         # added by cl≠
-        max_decisions_cap=None  # 新增初始化参数
+        max_decisions_cap=None,  # 新增初始化参数
+        var_embedding_dim=16,    # 变量嵌入特征的维度
+        clause_embedding_dim=16  # 子句嵌入特征的维度
     ):
 
         self.problems_paths = [realpath(el) for el in problems_paths.split(":")]
@@ -116,15 +135,43 @@ class gym_sat_Env(gym.Env):
         self.curr_problem = None # 程序运行中会被赋值为具体的问题对象或数据
 
         self.global_in_size = 1 # 全局数据的维度
-        # 更改变量和子句节点的特征维度
-        # 变量节点: 1(标识符) + 5(新特征) + 2(Q值预留位) = 8维
-        # 子句节点: 1(标识符) + 15(新特征) = 16维
-        self.vertex_in_size = 16 # 使用最大的特征维度，对于不适用的维度填充0
+        self.var_embedding_dim = var_embedding_dim
+        self.clause_embedding_dim = clause_embedding_dim
+
+        # 定义每个节点的特征结构：
+        # 第0列 (NODE_TYPE_COL): 节点类型标识符 (NODE_TYPE_VAR 代表变量，NODE_TYPE_CLAUSE 代表子句)。
+        # 第1列 (NODE_ID_COL): 节点原始ID (对于变量，是其在问题中的原始索引；对于子句，是其在当前子句列表中的索引)。
+        # 从第2列 (HANDCRAFTED_FEATURES_START_COL) 开始: 手工计算的特征。
+        # 手工特征之后: 可学习的嵌入特征 (在环境中初始化为0)。
+
+        # 计算变量节点的总特征维度
+        var_features_total_dim = (
+            1  # 类型
+            + 1  # ID
+            + NUM_HANDCRAFTED_VAR_FEATURES  # 手工特征
+            + self.var_embedding_dim  # 嵌入特征
+        )
+        # 计算子句节点的总特征维度
+        clause_features_total_dim = (
+            1  # 类型
+            + 1  # ID
+            + NUM_HANDCRAFTED_CLAUSE_FEATURES  # 手工特征
+            + self.clause_embedding_dim  # 嵌入特征
+        )
+        
+        # 节点特征的总维度取变量和子句中较大的一个，不足的进行零填充
+        self.vertex_in_size = max(var_features_total_dim, clause_features_total_dim)
+        
         # 边特征维度:
-        # [0,1] 表示正文字边
-        # [1,0] 表示负文字边
-        self.edge_in_size = 2  # 将边的输入大小设置为 2，说明在图结构中，每条边附带的特征有两个维度或数据项
+        # [1,0] 表示正文字边 (变量 -> 子句)
+        # [0,1] 表示负文字边 (变量 -> 子句)
+        # 注意：原始代码中 edge_data[ec : ec + 2, int(l > 0)] = 1 的逻辑，
+        # 如果 l > 0 (正文字), int(l > 0) 是 1, 那么 edge_data[:, 1] = 1, 即 [0,1]
+        # 如果 l < 0 (负文字), int(l > 0) 是 0, 那么 edge_data[:, 0] = 1, 即 [1,0]
+        # 这与注释中的 [0,1]正、[1,0]负 是对应的。
+        self.edge_in_size = 2  # 将边的输入大小设置为 2
         self.max_clause_len = 0 # 记录某个约束或表达式中最长子句的长度
+        logging.info(f"Initialized MiniSATEnv with vertex_in_size: {self.vertex_in_size}, var_embedding_dim: {self.var_embedding_dim}, clause_embedding_dim: {self.clause_embedding_dim}")
 
     def parse_state_as_graph(self):
 
@@ -218,42 +265,89 @@ class gym_sat_Env(gym.Env):
 
         vertex_data = np.zeros(
             (num_var + clause_counter, self.vertex_in_size), dtype=np.float32
-        )  # both vars and clauses are vertex in the graph
+        )  # 变量和子句都作为图中的顶点
+
+        # 1. 填充节点类型 (第 NODE_TYPE_COL 列)
+        vertex_data[:num_var, NODE_TYPE_COL] = NODE_TYPE_VAR  # 变量节点类型为 NODE_TYPE_VAR
+        vertex_data[num_var:, NODE_TYPE_COL] = NODE_TYPE_CLAUSE # 子句节点类型为 NODE_TYPE_CLAUSE
+
+        # 2. 填充节点原始ID (第 NODE_ID_COL 列)
+        #    对于变量节点，存储其在原始问题中的索引 (注意：valid_vars 存储的是原始索引)
+        for i in range(num_var):
+            vertex_data[i, NODE_ID_COL] = valid_vars[i]
+        #    对于子句节点，存储其在当前子句列表中的索引 (0 到 clause_counter-1)
+        for i in range(clause_counter):
+            vertex_data[num_var + i, NODE_ID_COL] = i
         
-        # 设置节点类型标识符
-        vertex_data[:num_var, VAR_ID_IDX] = 1  # 变量节点
-        vertex_data[num_var:, VAR_ID_IDX + 1] = 1  # 子句节点
+        # 3. 填充手工计算的特征 (从 HANDCRAFTED_FEATURES_START_COL 列开始)
+        #    首先，需要将子句映射回原始格式(1到total_var的索引)
+        #    从当前的有效变量子集映射回原始变量索引 (注意：这里 reverse_vars_remapping 的键是紧凑索引，值是原始索引)
+        #    而 CNFFeatureExtractor 需要的子句是基于原始变量索引的。
+        #    clauses 中的字面量已经是基于原始变量索引的（符号表示正负，绝对值-1是原始索引）
+        #    但是 CNFFeatureExtractor 的输入子句格式是 [[1, -2, 3], ...]
+        #    而 self.S.getClauses() 返回的子句中，字面量 l 的 abs(l)-1 是原始变量索引。
+        #    所以，我们需要将 self.S.getClauses() 的输出转换为 CNFFeatureExtractor 期望的格式。
+
+        original_format_clauses_for_extractor = []
+        for clause_lits_original_indices in clauses: # clause_lits_original_indices: e.g. [1, -2] where 1 means var 0, -2 means var 1 negated
+            current_clause_for_extractor = []
+            for lit_val in clause_lits_original_indices:
+                original_var_id = abs(lit_val) - 1 # 获取原始变量ID (0-indexed)
+                # CNFFeatureExtractor 需要 1-indexed 的变量，并用符号表示正负
+                extractor_lit = (original_var_id + 1) if lit_val > 0 else -(original_var_id + 1)
+                current_clause_for_extractor.append(extractor_lit)
+            original_format_clauses_for_extractor.append(current_clause_for_extractor)
+
+        feature_extractor = CNFFeatureExtractor(original_format_clauses_for_extractor, total_var)
         
-        # 使用我们的特征提取器计算特征
-        # 首先，需要将子句映射回原始格式(1到num_total_var的索引)
-        # 从当前的有效变量子集映射回原始变量索引
-        reverse_vars_remapping = {i: var_id for var_id, i in vars_remapping.items()}
-        
-        # 准备原始格式的子句列表
-        original_format_clauses = []
-        for clause in clauses:
-            original_clause = []
-            for lit in clause:
-                var_idx = reverse_vars_remapping[abs(lit) - 1]
-                original_lit = (var_idx + 1) if lit > 0 else -(var_idx + 1)
-                original_clause.append(original_lit)
-            original_format_clauses.append(original_clause)
-        
-        # 计算节点特征
-        feature_extractor = CNFFeatureExtractor(original_format_clauses, total_var)
-        
-        # 提取变量特征
-        var_features = feature_extractor.extract_var_features()
-        # 只为当前未赋值的变量设置特征
-        for i, var_idx in enumerate(valid_vars):
-            # 变量节点特征: 从索引1开始 (索引0是节点类型标识符)
-            vertex_data[i, 1:8] = var_features[var_idx]  # 包括5个CNF特征和2个Q值预留位
+        # 提取变量的手工特征 (NUM_HANDCRAFTED_VAR_FEATURES 个)
+        var_handcrafted_features = feature_extractor.extract_var_features() # 返回的是针对所有 total_var 个变量的特征
+        # 只为当前图中存在的未赋值变量（即 valid_vars）填充特征
+        for i, original_var_idx in enumerate(valid_vars): # i 是紧凑索引 (0 to num_var-1), original_var_idx 是原始变量索引
+            start_col = HANDCRAFTED_FEATURES_START_COL
+            end_col = start_col + NUM_HANDCRAFTED_VAR_FEATURES
+            vertex_data[i, start_col:end_col] = var_handcrafted_features[original_var_idx]
             
-        # 提取子句特征
-        clause_features = feature_extractor.extract_clause_features()
-        # 为所有子句设置特征
-        vertex_data[num_var:, 1:16] = clause_features
+        # 提取子句的手工特征 (NUM_HANDCRAFTED_CLAUSE_FEATURES 个)
+        clause_handcrafted_features = feature_extractor.extract_clause_features() # 返回针对所有 original_format_clauses_for_extractor 的特征
+        # 为所有子句节点填充特征
+        start_col = HANDCRAFTED_FEATURES_START_COL
+        end_col = start_col + NUM_HANDCRAFTED_CLAUSE_FEATURES
+        vertex_data[num_var:, start_col:end_col] = clause_handcrafted_features
+
+        # 4. 嵌入特征空间：
+        #    手工特征之后的部分将用于存储可学习的嵌入向量。
+        #    对于变量节点，嵌入特征从 HANDCRAFTED_FEATURES_START_COL + NUM_HANDCRAFTED_VAR_FEATURES 列开始。
+        #    对于子句节点，嵌入特征从 HANDCRAFTED_FEATURES_START_COL + NUM_HANDCRAFTED_CLAUSE_FEATURES 列开始。
+        #    由于 vertex_data 初始化为0，这些嵌入特征的初始值也为0。
+        #    实际的嵌入值将在图神经网络模型中学习和填充。
         
+        #日志输出
+        logging.debug("--- Graph Data for Current State ---")
+        logging.debug(f"Total Vertex data shape: {vertex_data.shape}")
+        
+        # 分别记录变量节点数据
+        variable_nodes_data = vertex_data[:num_var, :]
+        logging.debug(f"Variable Node Data shape: {variable_nodes_data.shape}")
+        logging.debug(f"Variable Node Data (first 5 rows if available):\n{variable_nodes_data[:5]}")
+        if variable_nodes_data.shape[0] > 5:
+            logging.debug(f"Variable Node Data (last 5 rows if available):\n{variable_nodes_data[-5:]}")
+
+        # 分别记录子句节点数据
+        clause_nodes_data = vertex_data[num_var:, :]
+        logging.debug(f"Clause Node Data shape: {clause_nodes_data.shape}")
+        logging.debug(f"Clause Node Data (first 5 rows if available):\n{clause_nodes_data[:5]}")
+        if clause_nodes_data.shape[0] > 5:
+            logging.debug(f"Clause Node Data (last 5 rows if available):\n{clause_nodes_data[-5:]}")
+        
+        # 完整数据仍然可以按需记录，但可能非常大，默认注释掉或部分记录
+        # logging.debug(f"Full Vertex data:\n{vertex_data}") 
+
+        logging.debug(f"Edge data shape: {edge_data.shape}")
+        logging.debug(f"Edge data (first 10 rows if available):\n{edge_data[:10]}")
+        logging.debug(f"Connectivity shape: {connectivity.shape}")
+        logging.debug(f"Connectivity data (first 10 columns if available):\n{connectivity[:, :10]}")
+        sys.exit(0) #执行完日志输出后退出 (调试时使用)
         return (
             (
                 vertex_data,
@@ -409,11 +503,28 @@ class gym_sat_Env(gym.Env):
             return no_restart_steps / steps
 
     def get_dummy_state(self):
-        DUMMY_V = np.zeros((2, self.vertex_in_size), dtype=np.float32)
-        DUMMY_V[:, VAR_ID_IDX] = 1  # 设置为变量节点
-        # 设置一些虚拟特征值，防止模型出错
-        # 为虚拟变量节点填充有效的特征值 (5个CNF特征 + 2个Q值预留位)
-        DUMMY_V[:, 1:8] = np.array([0.5, 0.5, 1.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        DUMMY_V = np.zeros((2, self.vertex_in_size), dtype=np.float32) # 创建包含两个虚拟节点的特征矩阵
+        
+        # 填充节点类型 (第 NODE_TYPE_COL 列)
+        DUMMY_V[:, NODE_TYPE_COL] = NODE_TYPE_VAR  # 将两个虚拟节点都设置为变量类型
+        
+        # 填充节点ID (第 NODE_ID_COL 列) - 可以使用虚拟ID
+        DUMMY_V[0, NODE_ID_COL] = 0 # 虚拟变量节点0的ID
+        DUMMY_V[1, NODE_ID_COL] = 1 # 虚拟变量节点1的ID
+        
+        # 填充手工特征 (从 HANDCRAFTED_FEATURES_START_COL 列开始)
+        # 为虚拟变量节点填充 NUM_HANDCRAFTED_VAR_FEATURES 个手工特征
+        dummy_handcrafted_var_features = np.array([0.5, 0.5, 1.0, 0.0, 0.0], dtype=np.float32) # 示例手工特征
+        if len(dummy_handcrafted_var_features) != NUM_HANDCRAFTED_VAR_FEATURES:
+            # 如果示例特征数量不匹配，则用0填充或截断 (确保维度正确)
+            dummy_handcrafted_var_features = np.zeros(NUM_HANDCRAFTED_VAR_FEATURES, dtype=np.float32)
+            # 或者根据需要调整示例特征
+
+        start_col = HANDCRAFTED_FEATURES_START_COL
+        end_col = start_col + NUM_HANDCRAFTED_VAR_FEATURES
+        DUMMY_V[:, start_col:end_col] = dummy_handcrafted_var_features
+        
+        # 嵌入特征部分将保持为0，由 np.zeros 初始化得到
         
         DUMMY_STATE = (
             DUMMY_V,
