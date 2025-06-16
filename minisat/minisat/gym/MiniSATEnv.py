@@ -384,7 +384,7 @@ class gym_sat_Env(gym.Env):
         logging.debug(f"Edge data (first 10 rows if available):\n{edge_data[:10]}")
         logging.debug(f"Connectivity shape: {connectivity.shape}")
         logging.debug(f"Connectivity data (first 10 columns if available):\n{connectivity[:, :10]}")
-        sys.exit(0) #执行完日志输出后退出 (调试时使用)
+        # sys.exit(0) #执行完日志输出后退出 (调试时使用)
         return (
             (
                 vertex_data,
