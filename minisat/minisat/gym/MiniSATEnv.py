@@ -110,7 +110,9 @@ class gym_sat_Env(gym.Env):
 
         self.metadata = {}
         # added by cl
-        self.max_decisions_cap = max_decisions_cap if max_decisions_cap is not None else sys.maxsize
+        # The C++ backend expects a 32-bit signed int for the decisions cap.
+        # sys.maxsize causes an OverflowError on 64-bit systems.
+        self.max_decisions_cap = max_decisions_cap if max_decisions_cap is not None else 2147483647
         # self.max_decisions_cap = float("inf")
         self.max_cap_fill_buffer = max_cap_fill_buffer
         self.penalty_size = penalty_size if penalty_size is not None else 0.0001
@@ -234,23 +236,10 @@ class gym_sat_Env(gym.Env):
         # we should return the vertex/edge numpy objects from the c++ code to make this faster
         clauses = self.S.getClauses()
 
-        if len(clauses) == 0:
-            # this is to avoid feeding empty data structures to our model
-            # when the MiniSAT environment returns an empty graph
-            # it might return an empty graph since we do not construct it when
-            # step > max_cap and max_cap can be zero (all decisions are made by MiniSAT's VSIDS).
-            empty_state = self.get_dummy_state()
-            # 紧凑动作索引 -> 原始字面量
-            self.decision_to_var_mapping = {
-                el: el
-                for sl in range(empty_state[0].shape[0])
-                for el in (2 * sl, 2 * sl + 1)
-            }
-            return empty_state, False
-
         clause_counter = 0
         clauses_lens = [len(cl) for cl in clauses]
-        self.max_clause_len = max(clauses_lens)
+        # Handle case where solver simplifies the formula to have no clauses.
+        self.max_clause_len = max(clauses_lens) if clauses else 0
         edge_data = np.zeros((sum(clauses_lens) * 2, 2), dtype=np.float32)
         connectivity = np.zeros((2, edge_data.shape[0]), dtype=int)
         ec = 0
@@ -384,7 +373,7 @@ class gym_sat_Env(gym.Env):
         logging.debug(f"Edge data (first 10 rows if available):\n{edge_data[:10]}")
         logging.debug(f"Connectivity shape: {connectivity.shape}")
         logging.debug(f"Connectivity data (first 10 columns if available):\n{connectivity[:, :10]}")
-        # sys.exit(0) #执行完日志输出后退出 (调试时使用)
+        # sys.exit(0) # DEBUG: This was preventing the test from completing.
         return (
             (
                 vertex_data,
@@ -520,13 +509,13 @@ class gym_sat_Env(gym.Env):
     def normalized_score(self, steps, problem):
         pdir, pname = split(problem)
 #         NoneType' object is not subscriptable
-#   File "/4T/chenli/GraphSat_cli/minisat/minisat/gym/MiniSATEnv.py", line 352, in normalized_score
+#   File "/4T/chenli/CGSAT/minisat/minisat/gym/MiniSATEnv.py", line 352, in normalized_score
 #     no_restart_steps, restart_steps = self.metadata[pdir][pname]
 #                                       ~~~~~~~~~~~~~^^^^^^
-#   File "/4T/chenli/GraphSat_cli/gqsat/utils.py", line 510, in evaluate
+#   File "/4T/chenli/CGSAT/gqsat/utils.py", line 510, in evaluate
 #     ns = eval_env.normalized_score(sctr, eval_env.curr_problem)
 #          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-#   File "/4T/chenli/GraphSat_cli/dqn.py", line 276, in <module>
+#   File "/4T/chenli/CGSAT/dqn.py", line 276, in <module>
 #     agent, args, include_train_set=False
 
 #                     )

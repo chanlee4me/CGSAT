@@ -3,7 +3,7 @@ import sys
 from os.path import realpath, join, split
 
 # Ensure gqsat module can be found
-# This assumes the script is run from the root of the GraphSat_cli project
+# This assumes the script is run from the root of the CGSAT project
 sys.path.append(realpath(join(split(realpath(__file__))[0], '.')))
 from gqsat.cnf_features import CNFFeatureExtractor
 
