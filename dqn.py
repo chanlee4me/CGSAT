@@ -241,7 +241,10 @@ if __name__ == "__main__":
         else:
             # 如果没有提供已有模型路径，则从头开始创建一个新的模型
             net = EncoderCoreDecoder(
-                (env.vertex_in_size, env.edge_in_size, env.global_in_size),
+                var_feature_dim=env.var_feature_dim,
+                clause_feature_dim=env.clause_feature_dim,
+                edge_in_dim=env.edge_in_size,
+                global_in_dim=env.global_in_size,
                 core_out_dims=(
                     args.core_v_out_size,
                     args.core_e_out_size,
@@ -254,17 +257,15 @@ if __name__ == "__main__":
                     args.decoder_e_out_size,
                     args.decoder_e_out_size,
                 ),
-                encoder_out_dims=(
-                    args.encoder_v_out_size,
-                    args.encoder_e_out_size,
-                    args.encoder_e_out_size,
-                ),
                 save_name=model_save_path,
                 e2v_agg=args.e2v_aggregator,
                 n_hidden=args.n_hidden,
                 hidden_size=args.hidden_size,
                 activation=arg2activation(args.activation),
                 independent_block_layers=args.independent_block_layers,
+                use_sat_message_passing=args.use_sat_message_passing,
+                mp_heads=args.mp_heads,
+                mp_dropout=args.mp_dropout,
             ).to(args.device)
         
         # 打印模型结构，并创建目标网络 target_net
@@ -384,7 +385,7 @@ if __name__ == "__main__":
                                 best_eval_so_far[safe_sc_key] = float(median_score)  # 转换为 Python float
                                 best_checkpoint[safe_sc_key] = f"model_{learner.step_ctr}.chkp"  # 记录检查点路径
                                 #added by cl 输出日志信息
-                                logging.info(f"[best_checkpoint] {safe_sc_key}", best_checkpoint[safe_sc_key])
+                                logging.info(f"[best_checkpoint] {safe_sc_key}: {best_checkpoint[safe_sc_key]}")
                             writer.add_scalar(
                                 f"data/median relative score: {safe_sc_key}",
                                 np.nanmedian(res_vals),
@@ -402,6 +403,11 @@ if __name__ == "__main__":
                             )
                     for k, v in best_eval_so_far.items():
                         writer.add_scalar(k, v, learner.step_ctr - 1)
+
+                    # 如果是评估模式，则在评估完成后退出
+                    if args.eval:
+                        print("Evaluation is done, exiting now.")
+                        exit(0)
                 # 记录学习步骤信息到 TensorBoard。
                 for k, v in step_info.items():
                     writer.add_scalar(k, v, learner.step_ctr - 1)

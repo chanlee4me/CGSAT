@@ -78,24 +78,19 @@ class gym_sat_Env(gym.Env):
         max_data_limit_per_set=None,
         # added by cl≠
         max_decisions_cap=None,  # 新增初始化参数
-        var_embedding_dim=16,    # 变量嵌入特征的维度 (用于GRU输入)
-        clause_embedding_dim=16, # 子句嵌入特征的维度 (用于GRU输入)
-        var_gru_output_dim=None,    # 变量GRU输出/隐藏状态维度
-        clause_gru_output_dim=None  # 子句GRU输出/隐藏状态维度
+        var_embedding_dim=16,    # 变量嵌入特征的维度 
+        clause_embedding_dim=16, # 子句嵌入特征的维度
     ):
+        super(gym_sat_Env, self).__init__()
 
         self.problems_paths = [realpath(el) for el in problems_paths.split(":")]
         self.args = args
         self.test_mode = test_mode
 
-        # added by cl
-        # 实际中这两个定义不会对内部逻辑产生影响，仅作为对外接口说明
-        # 定义动作空间：对于每个变量有两个动作（正/负赋值），因此总动作数为 2 * num_vars
         self.action_space = spaces.Discrete(2 * self.args.nums_variable)
         self.observation_space = spaces.Box(low=0, high=1, shape=(self.args.nums_variable,), dtype=np.float32)
 
         self.max_data_limit_per_set = max_data_limit_per_set
-        # 收集多个目录下的 .cnf 文件路径，组织成二维列表
         pre_test_files = [
             [join(dir, f) for f in listdir(dir) if f.endswith(".cnf")]
             for dir in self.problems_paths
@@ -105,15 +100,10 @@ class gym_sat_Env(gym.Env):
                 np.random.choice(el, size=max_data_limit_per_set, replace=False)
                 for el in pre_test_files
             ]
-        # 将上方得到的二维列表 pre_test_files 展平为 一维列表 self.test_files
         self.test_files = [sl for el in pre_test_files for sl in el]
 
         self.metadata = {}
-        # added by cl
-        # The C++ backend expects a 32-bit signed int for the decisions cap.
-        # sys.maxsize causes an OverflowError on 64-bit systems.
         self.max_decisions_cap = max_decisions_cap if max_decisions_cap is not None else 2147483647
-        # self.max_decisions_cap = float("inf")
         self.max_cap_fill_buffer = max_cap_fill_buffer
         self.penalty_size = penalty_size if penalty_size is not None else 0.0001
         self.with_restarts = True if with_restarts is None else with_restarts
@@ -132,58 +122,33 @@ class gym_sat_Env(gym.Env):
             print(e)
             print("No metadata available, that is fine for metadata generator.")
             self.metadata = None
-        #初始化一些后续要用到的参数
-        self.test_file_num = len(self.test_files) # 计算并存储了 test_files 列表的长度
-        self.test_to = 0 # 用作一个索引，用于遍历&指向当前将要处理的测试文件。
 
-        self.step_ctr = 0 # 追踪程序执行的步数或迭代次数
-        self.curr_problem = None # 程序运行中会被赋值为具体的问题对象或数据
+        self.test_file_num = len(self.test_files)
+        self.test_to = 0
+        self.step_ctr = 0
+        self.curr_problem = None
 
-        self.global_in_size = 1 # 全局数据的维度
+        # --- 架构重构：移除模型逻辑，定义原始特征维度 ---
+        self.global_in_size = 1
         self.var_embedding_dim = var_embedding_dim
         self.clause_embedding_dim = clause_embedding_dim
 
-        # 如果未指定GRU输出维度，则默认为相应的输入嵌入维度
-        self.var_gru_output_dim = var_gru_output_dim if var_gru_output_dim is not None else var_embedding_dim
-        self.clause_gru_output_dim = clause_gru_output_dim if clause_gru_output_dim is not None else clause_embedding_dim
+        # 定义原始特征的维度 (手工特征 + 可学习嵌入)
+        self.var_feature_dim = NUM_HANDCRAFTED_VAR_FEATURES + self.var_embedding_dim
+        self.clause_feature_dim = NUM_HANDCRAFTED_CLAUSE_FEATURES + self.clause_embedding_dim
 
-        # 初始化 GRU 层
-        # 变量节点的GRU: 输入维度 = 手工特征维度 + 变量嵌入维度, 输出维度 = 变量GRU隐藏状态维度
-        self.var_gru = nn.GRU(
-            input_size=NUM_HANDCRAFTED_VAR_FEATURES + self.var_embedding_dim,
-            hidden_size=self.var_gru_output_dim,
-            batch_first=False # 输入形状: (seq_len, batch, feature)
-        )
-        # 子句节点的GRU: 输入维度 = 手工特征维度 + 子句嵌入维度, 输出维度 = 子句GRU隐藏状态维度
-        self.clause_gru = nn.GRU(
-            input_size=NUM_HANDCRAFTED_CLAUSE_FEATURES + self.clause_embedding_dim,
-            hidden_size=self.clause_gru_output_dim,
-            batch_first=False # 输入形状: (seq_len, batch, feature)
-        )
-
-        # 定义每个节点的特征结构：
-        # 第0列 (NODE_TYPE_COL): 节点类型标识符 (NODE_TYPE_VAR 代表变量，NODE_TYPE_CLAUSE 代表子句)。
-        # 第1列 (NODE_ID_COL): 节点原始ID。
-        # 从第2列 (HANDCRAFTED_FEATURES_START_COL) 开始: GRU处理后的初始隐藏状态。
-
-        # 节点特征的总维度现在由GRU的输出决定
-        # (类型标识符 + 原始ID + GRU输出的最大维度)
-        self.vertex_in_size = 2 + max(self.var_gru_output_dim, self.clause_gru_output_dim)
+        # 节点特征的总维度 = 2 (类型, ID) + 填充到最大值的特征维度
+        # 模型将需要处理这种异构和填充
+        self.vertex_in_size = 2 + max(self.var_feature_dim, self.clause_feature_dim)
         
-        # 边特征维度:
-        # [1,0] 表示正文字边 (变量 -> 子句)
+        # 边特征维度保持不变
+        # [1,0] -> 正边, [0,1] -> 负边 表示正文字边 (变量 -> 子句)
         # [0,1] 表示负文字边 (变量 -> 子句)
         # 注意：原始代码中 edge_data[ec : ec + 2, int(l > 0)] = 1 的逻辑，
         # 如果 l > 0 (正文字), int(l > 0) 是 1, 那么 edge_data[:, 1] = 1, 即 [0,1]
         # 如果 l < 0 (负文字), int(l > 0) 是 0, 那么 edge_data[:, 0] = 1, 即 [1,0]
         # 这与注释中的 [0,1]正、[1,0]负 是对应的。
-        self.edge_in_size = 2  # 将边的输入大小设置为 2
-        self.max_clause_len = 0 # 记录某个约束或表达式中最长子句的长度
-        logging.info(f"Initialized MiniSATEnv with vertex_in_size (after GRU): {self.vertex_in_size}, "
-                     f"var_gru_input_dims (handcrafted+embed): {NUM_HANDCRAFTED_VAR_FEATURES}+{self.var_embedding_dim}, "
-                     f"var_gru_output_dim: {self.var_gru_output_dim}, "
-                     f"clause_gru_input_dims (handcrafted+embed): {NUM_HANDCRAFTED_CLAUSE_FEATURES}+{self.clause_embedding_dim}, "
-                     f"clause_gru_output_dim: {self.clause_gru_output_dim}")
+        self.edge_in_size = 2  
 
     def parse_state_as_graph(self):
 
@@ -264,11 +229,11 @@ class gym_sat_Env(gym.Env):
 
         vertex_data = np.zeros(
             (num_var + clause_counter, self.vertex_in_size), dtype=np.float32
-        )  # 变量和子句都作为图中的顶点, 大小基于GRU输出
+        )  
 
         # 1. 填充节点类型 (第 NODE_TYPE_COL 列)
-        vertex_data[:num_var, NODE_TYPE_COL] = NODE_TYPE_VAR  # 变量节点类型为 NODE_TYPE_VAR
-        vertex_data[num_var:, NODE_TYPE_COL] = NODE_TYPE_CLAUSE # 子句节点类型为 NODE_TYPE_CLAUSE
+        vertex_data[:num_var, NODE_TYPE_COL] = NODE_TYPE_VAR  
+        vertex_data[num_var:, NODE_TYPE_COL] = NODE_TYPE_CLAUSE 
 
         # 2. 填充节点原始ID (第 NODE_ID_COL 列)
         #    对于变量节点，存储其在原始问题中的索引 (注意：valid_vars 存储的是原始索引)
@@ -278,78 +243,43 @@ class gym_sat_Env(gym.Env):
         for i in range(clause_counter):
             vertex_data[num_var + i, NODE_ID_COL] = i
         
-        # 准备将手工特征和初始嵌入（零向量）拼接后送入GRU
-        # 变量节点的GRU输入特征准备
-        var_features_for_gru_input = np.zeros(
-            (num_var, NUM_HANDCRAFTED_VAR_FEATURES + self.var_embedding_dim),
-            dtype=np.float32
-        )
-        # 子句节点的GRU输入特征准备
-        clause_features_for_gru_input = np.zeros(
-            (clause_counter, NUM_HANDCRAFTED_CLAUSE_FEATURES + self.clause_embedding_dim),
-            dtype=np.float32
-        )
-
-        # 3. 提取手工计算的特征
-        #    (此部分代码与之前类似，提取 original_format_clauses_for_extractor 和 feature_extractor)
-        original_format_clauses_for_extractor = []
-        for clause_lits_original_indices in clauses: # clause_lits_original_indices: e.g. [1, -2] where 1 means var 0, -2 means var 1 negated
-            current_clause_for_extractor = []
-            for lit_val in clause_lits_original_indices:
-                original_var_id = abs(lit_val) - 1 # 获取原始变量ID (0-indexed)
-                # CNFFeatureExtractor 需要 1-indexed 的变量，并用符号表示正负
-                extractor_lit = (original_var_id + 1) if lit_val > 0 else -(original_var_id + 1)
-                current_clause_for_extractor.append(extractor_lit)
-            original_format_clauses_for_extractor.append(current_clause_for_extractor)
-
-        feature_extractor = CNFFeatureExtractor(original_format_clauses_for_extractor, total_var)
-        
+        # --- 架构重构：生成原始特征，不再进行GRU计算 ---
+        # 1. 准备变量特征 (手工 + 嵌入)
+        var_ids = valid_vars
+        var_features = np.zeros((num_var, self.var_feature_dim), dtype=np.float32)
         # 提取变量的手工特征 (NUM_HANDCRAFTED_VAR_FEATURES 个)
-        var_handcrafted_features = feature_extractor.extract_var_features() # 返回的是针对所有 total_var 个变量的特征
-        # 只为当前图中存在的未赋值变量（即 valid_vars）填充手工特征到GRU输入数组
-        for i, original_var_idx in enumerate(valid_vars): # i 是紧凑索引 (0 to num_var-1), original_var_idx 是原始变量索引
-            var_features_for_gru_input[i, :NUM_HANDCRAFTED_VAR_FEATURES] = var_handcrafted_features[original_var_idx]
-            # 后面的 self.var_embedding_dim 部分保持为0，作为GRU的初始可学习部分输入
-            
+        var_handcrafted_features = CNFFeatureExtractor(clauses, total_var).extract_var_features() 
+        for i in range(num_var):
+            original_var_idx = var_ids[i]
+            var_features[i, :NUM_HANDCRAFTED_VAR_FEATURES] = var_handcrafted_features[original_var_idx]
+            if self.var_embedding_dim > 0:
+                var_features[i, NUM_HANDCRAFTED_VAR_FEATURES:] = np.zeros(self.var_embedding_dim)
+
+        # 2. 准备子句特征 (手工 + 嵌入)
+        clause_ids = list(range(clause_counter))
+        clause_features = np.zeros((clause_counter, self.clause_feature_dim), dtype=np.float32)
         # 提取子句的手工特征 (NUM_HANDCRAFTED_CLAUSE_FEATURES 个)
-        clause_handcrafted_features = feature_extractor.extract_clause_features() # 返回针对所有 original_format_clauses_for_extractor 的特征
-        # 为所有子句节点填充手工特征到GRU输入数组
-        clause_features_for_gru_input[:, :NUM_HANDCRAFTED_CLAUSE_FEATURES] = clause_handcrafted_features
-        # 后面的 self.clause_embedding_dim 部分保持为0，作为GRU的初始可学习部分输入
+        clause_handcrafted_features = CNFFeatureExtractor(clauses, total_var).extract_clause_features() 
+        clause_features[:, :NUM_HANDCRAFTED_CLAUSE_FEATURES] = clause_handcrafted_features
+        if self.clause_embedding_dim > 0:
+            for i in range(clause_counter):
+                original_clause_idx = clause_ids[i]
+                clause_features[i, NUM_HANDCRAFTED_CLAUSE_FEATURES:] = np.zeros(self.clause_embedding_dim)
 
-        # 4. 通过GRU层处理拼接后的特征以获得初始隐藏状态
-        #    HANDCRAFTED_FEATURES_START_COL (即第2列) 之后将存储GRU的输出
+        # 3. 创建统一的、填充过的节点特征矩阵 v_data
+        max_feature_dim = max(self.var_feature_dim, self.clause_feature_dim)
 
-        # 处理变量节点
-        if num_var > 0:
-            var_gru_input_tensor = torch.from_numpy(var_features_for_gru_input).float()
-            # GRU期望输入形状: (seq_len, batch, input_size)
-            # 此处每个节点是一个batch中的项, seq_len=1
-            var_gru_input_tensor = var_gru_input_tensor.unsqueeze(0) # (1, num_var, feature_size)
-            
-            # GRU不接受空的batch输入，所以需要检查num_var > 0
-            var_gru_output, _ = self.var_gru(var_gru_input_tensor) # output: (1, num_var, var_gru_output_dim)
-            var_initial_hidden_states = var_gru_output.squeeze(0).detach().cpu().numpy()
-            
-            # 将GRU输出的初始隐藏状态填充到vertex_data中
-            vertex_data[:num_var, HANDCRAFTED_FEATURES_START_COL : HANDCRAFTED_FEATURES_START_COL + self.var_gru_output_dim] = var_initial_hidden_states
+        # 填充变量节点数据 (并进行右侧零填充)
+        for i in range(num_var):
+            vertex_data[i, HANDCRAFTED_FEATURES_START_COL : HANDCRAFTED_FEATURES_START_COL + self.var_feature_dim] = var_features[i]
 
-        # 处理子句节点
-        if clause_counter > 0:
-            clause_gru_input_tensor = torch.from_numpy(clause_features_for_gru_input).float()
-            clause_gru_input_tensor = clause_gru_input_tensor.unsqueeze(0) # (1, clause_counter, feature_size)
+        # 填充子句节点数据 (并进行右侧零填充)
+        for i in range(clause_counter):
+            clause_node_actual_idx = i + num_var
+            vertex_data[clause_node_actual_idx, HANDCRAFTED_FEATURES_START_COL : HANDCRAFTED_FEATURES_START_COL + self.clause_feature_dim] = clause_features[i]
 
-            # GRU不接受空的batch输入
-            clause_gru_output, _ = self.clause_gru(clause_gru_input_tensor) # output: (1, clause_counter, clause_gru_output_dim)
-            clause_initial_hidden_states = clause_gru_output.squeeze(0).detach().cpu().numpy()
-
-            # 将GRU输出的初始隐藏状态填充到vertex_data中
-            # 注意：如果 self.var_gru_output_dim 和 self.clause_gru_output_dim 不同，
-            # self.vertex_in_size 会确保宽度足够，较短的会被0填充（因为vertex_data初始化为0）
-            vertex_data[num_var:, HANDCRAFTED_FEATURES_START_COL : HANDCRAFTED_FEATURES_START_COL + self.clause_gru_output_dim] = clause_initial_hidden_states
-        
-        # 日志输出 (vertex_data 现在包含GRU处理后的特征)
-        logging.debug("--- Graph Data for Current State (after GRU processing) ---")
+        # 日志输出 (vertex_data 现在包含原始特征)
+        logging.debug("--- Graph Data for Current State (after feature preparation) ---")
         logging.debug(f"Total Vertex data shape: {vertex_data.shape}")
         
         # 分别记录变量节点数据

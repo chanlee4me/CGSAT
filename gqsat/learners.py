@@ -136,7 +136,7 @@ class GraphLearner:
 
         # I do not know a better solution for getting the lr from the scheduler.
         # This will fail for different lrs for different layers.
-        lr_for_the_update = self.lr_scheduler.get_lr()[0]   # 获取当前学习率
+        lr_for_the_update = self.lr_scheduler.get_last_lr()[0]   # 获取当前学习率
 
         self.lr_scheduler.step()        # 更新学习率（按StepLR策略）
         return {

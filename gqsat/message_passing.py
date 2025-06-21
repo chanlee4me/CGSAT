@@ -1,3 +1,4 @@
+# Rewritten by Cascade to fix persistent IndentationError.
 import torch
 import torch.nn as nn
 from torch_geometric.nn import GATv2Conv
@@ -46,40 +47,58 @@ class SATMessagePassing(nn.Module):
         Returns:
             Tensor: 更新后的节点隐藏状态，形状 [num_nodes, out_channels]。
         """
-        # 1. 准备工作：分离变量和子句的旧隐藏状态
-        # 假设 x 的后 out_channels 维是上一轮的隐藏状态
-        h_old = x[:, -self.out_channels:]
-        
-        var_mask = x[:, NODE_TYPE_COL] == NODE_TYPE_VAR
-        clause_mask = x[:, NODE_TYPE_COL] == NODE_TYPE_CLAUSE
-        num_vars = var_mask.sum().item()
+        # 1. 准备工作: 分离节点和创建索引映射
+        node_types = x[:, NODE_TYPE_COL]
+        var_mask = node_types == NODE_TYPE_VAR
+        clause_mask = node_types == NODE_TYPE_CLAUSE
 
+        # 为变量和子句节点创建从全局索引到局部索引的映射
+        num_vars = var_mask.sum()
+        num_clauses = clause_mask.sum()
+        var_map = torch.full((x.size(0),), -1, dtype=torch.long, device=x.device)
+        clause_map = torch.full((x.size(0),), -1, dtype=torch.long, device=x.device)
+        var_map[var_mask] = torch.arange(num_vars, device=x.device)
+        clause_map[clause_mask] = torch.arange(num_clauses, device=x.device)
+
+        # 2. 严格分离和重映射边
+        # 通过同时检查源和目标节点的类型来确保边的正确性
+        src_types = node_types[edge_index[0]]
+        dst_types = node_types[edge_index[1]]
+        
+        v2c_edge_mask = (src_types == NODE_TYPE_VAR) & (dst_types == NODE_TYPE_CLAUSE)
+        c2v_edge_mask = (src_types == NODE_TYPE_CLAUSE) & (dst_types == NODE_TYPE_VAR)
+
+        v2c_edges = edge_index[:, v2c_edge_mask]
+        c2v_edges = edge_index[:, c2v_edge_mask]
+
+        v2c_edges_remapped = torch.stack([
+            var_map[v2c_edges[0]],
+            clause_map[v2c_edges[1]]
+        ])
+        c2v_edges_remapped = torch.stack([
+            clause_map[c2v_edges[0]],
+            var_map[c2v_edges[1]]
+        ])
+
+        # 3. 分离特征和隐藏状态
+        x_vars = x[var_mask]
+        x_clauses = x[clause_mask]
+        h_old = x[:, -self.out_channels:]
         h_v_old = h_old[var_mask]
         h_c_old = h_old[clause_mask]
 
-        # 2. V2C 消息传递
-        # GATv2Conv 支持二部图，传入 (source_features, target_features) 元组
-        # 这里，变量是源，子句是目标
-        # 我们需要调整边索引以适应分离的节点集
-        v2c_edge_index = edge_index[:, edge_index[0] >= num_vars]
-        v2c_edge_index[0] -= num_vars # 将子句索引映射到 [0, num_clauses-1]
-
-        m_c = self.v2c_conv((x[var_mask], x[clause_mask]), v2c_edge_index)
+        # 4. V2C 消息传递 (变量 -> 子句)
+        m_c = self.v2c_conv((x_vars, x_clauses), v2c_edges_remapped)
         m_c = self.dropout(self.c_norm(m_c))
         h_c_new = self.c_update(m_c, h_c_old)
-        
-        # 3. C2V 消息传递
-        # 这里，子句是源，变量是目标
-        # 使用更新后的子句隐藏状态 h_c_new 作为源特征
-        c2v_edge_index = edge_index[:, edge_index[0] < num_vars]
-        c2v_edge_index[1] -= num_vars # 将子句索引映射到 [0, num_clauses-1]
 
-        m_v = self.c2v_conv((h_c_new, x[var_mask]), c2v_edge_index)
+        # 5. C2V 消息传递 (子句 -> 变量)
+        m_v = self.c2v_conv((h_c_new, x_vars), c2v_edges_remapped)
         m_v = self.dropout(self.v_norm(m_v))
         h_v_new = self.v_update(m_v, h_v_old)
 
-        # 4. 组合最终结果
-        x_new = torch.zeros(x.size(0), self.out_channels, device=x.device)
+        # 6. 组合最终结果
+        x_new = torch.zeros(x.size(0), self.out_channels, device=x.device, dtype=h_v_new.dtype)
         x_new[var_mask] = h_v_new
         x_new[clause_mask] = h_c_new
 

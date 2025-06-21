@@ -36,6 +36,47 @@ import yaml
 import sys
 
 from .message_passing import SATMessagePassing # 导入新的消息传递模块
+from minisat.minisat.gym.MiniSATEnv import NODE_TYPE_COL, NODE_TYPE_VAR, NODE_TYPE_CLAUSE, HANDCRAFTED_FEATURES_START_COL
+
+
+class HeteroEncoder(torch.nn.Module):
+    """
+    An encoder to handle heterogeneous node features (variables and clauses).
+    It projects variable and clause features from their original, different-sized
+    spaces into a common-sized hidden space.
+    """
+    def __init__(self, var_feature_dim, clause_feature_dim, hidden_size):
+        super().__init__()
+        self.var_feature_dim = var_feature_dim
+        self.clause_feature_dim = clause_feature_dim
+        self.hidden_size = hidden_size
+
+        # Use simple MLPs to encode each node type
+        self.var_encoder = get_mlp(var_feature_dim, hidden_size, 1, hidden_size, activate_last=False)
+        self.clause_encoder = get_mlp(clause_feature_dim, hidden_size, 1, hidden_size, activate_last=False)
+
+    def forward(self, x):
+        # 1. Create masks to identify variable and clause nodes based on the type column
+        var_mask = x[:, NODE_TYPE_COL] == NODE_TYPE_VAR
+        clause_mask = x[:, NODE_TYPE_COL] == NODE_TYPE_CLAUSE
+
+        # 2. Extract the raw, un-padded features for each node type.
+        # The environment pads features to max_dim; we slice them back to their original size here.
+        var_features = x[var_mask, HANDCRAFTED_FEATURES_START_COL : HANDCRAFTED_FEATURES_START_COL + self.var_feature_dim]
+        clause_features = x[clause_mask, HANDCRAFTED_FEATURES_START_COL : HANDCRAFTED_FEATURES_START_COL + self.clause_feature_dim]
+
+        # 3. Apply the respective encoders. Handle cases where there are no nodes of a certain type.
+        encoded_vars = self.var_encoder(var_features) if var_features.shape[0] > 0 else var_features
+        encoded_clauses = self.clause_encoder(clause_features) if clause_features.shape[0] > 0 else clause_features
+
+        # 4. Create a new homogeneous tensor and fill it with the encoded features
+        x_out = torch.zeros(x.shape[0], self.hidden_size, device=x.device, dtype=torch.float32)
+        if encoded_vars.shape[0] > 0:
+            x_out[var_mask] = encoded_vars
+        if encoded_clauses.shape[0] > 0:
+            x_out[clause_mask] = encoded_clauses
+        
+        return x_out
 #added by cl 25-2-16
 
 class SatModel(torch.nn.Module):
@@ -150,6 +191,14 @@ class GraphNet(SatModel):
         self.global_model = get_mlp(global_mlp_in_dim, u_out, n_hidden, hidden_size, activation=activation, layer_norm=layer_norm)
 
     def forward(self, x, edge_index, edge_attr=None, u=None, v_indices=None, e_indices=None):
+        if self.use_sat_message_passing:
+            # The new message passing model only updates node features.
+            # It expects (x, edge_index) as input.
+            x = self.node_model(x, edge_index)
+            # We return edge_attr and u unchanged to maintain the loop signature in the caller.
+            return x, edge_attr, u
+
+        # --- Original logic for the old MLP-based model ---
         row, col = edge_index
 
         # 1. Edge Update
@@ -159,18 +208,14 @@ class GraphNet(SatModel):
 
         # 2. Node Update
         if self.node_model is not None:
-            if self.use_sat_message_passing:
-                # The new model expects (x, edge_index) and handles V2C/C2V internally
-                x = self.node_model(x, edge_index)
-            else:
-                # Old model logic
-                if self.e2v_agg == "sum":
-                    agg_e = scatter_add(edge_attr, col, dim=0, dim_size=x.size(0))
-                else: # "mean"
-                    agg_e = scatter_mean(edge_attr, col, dim=0, dim_size=x.size(0))
+            # Old model logic
+            if self.e2v_agg == "sum":
+                agg_e = scatter_add(edge_attr, col, dim=0, dim_size=x.size(0))
+            else: # "mean"
+                agg_e = scatter_mean(edge_attr, col, dim=0, dim_size=x.size(0))
 
-                x_in = x if self.independent else torch.cat([x, agg_e, u[v_indices]], dim=1)
-                x = self.node_model(x_in)
+            x_in = x if self.independent else torch.cat([x, agg_e, u[v_indices]], dim=1)
+            x = self.node_model(x_in)
 
         # 3. Global Update
         if self.global_model is not None:
@@ -189,11 +234,13 @@ class GraphNet(SatModel):
 class EncoderCoreDecoder(SatModel):
     def __init__(
         self,
-        in_dims,
+        var_feature_dim,
+        clause_feature_dim,
+        edge_in_dim,
+        global_in_dim,
         core_out_dims,
         out_dims,
         core_steps=1,
-        encoder_out_dims=None,
         dec_out_dims=None,
         save_name=None,
         e2v_agg="sum",
@@ -201,34 +248,23 @@ class EncoderCoreDecoder(SatModel):
         hidden_size=64,
         activation=ReLU,
         independent_block_layers=1,
-        use_sat_message_passing=False, # 新增flag
+        use_sat_message_passing=False,
         mp_heads=4,
         mp_dropout=0.1
     ):
         super().__init__(save_name)
-        # all dims are tuples with (v,e) feature sizes
         self.steps = core_steps
-        # if dec_out_dims is None, there will not be a decoder
-        self.in_dims = in_dims
         self.core_out_dims = core_out_dims
         self.dec_out_dims = dec_out_dims
-
         self.layer_norm = True
 
-        self.encoder = None
-        if encoder_out_dims is not None:
-            self.encoder = GraphNet(
-                in_dims,
-                encoder_out_dims,
-                independent=True,
-                n_hidden=independent_block_layers,
-                hidden_size=hidden_size,
-                activation=activation,
-                layer_norm=self.layer_norm,
-            )
+        # Encoder: Use the new HeteroEncoder for node features.
+        # Edge and global features are passed through.
+        self.encoder = HeteroEncoder(var_feature_dim, clause_feature_dim, hidden_size)
 
-        core_in_dims = in_dims if self.encoder is None else encoder_out_dims
-
+        # Core: Input dimensions are now based on the encoder's output (hidden_size)
+        # and the original edge/global feature dimensions.
+        core_in_dims = (hidden_size, edge_in_dim, global_in_dim)
         self.core = GraphNet(
             (
                 core_in_dims[0] + core_out_dims[0],
@@ -241,11 +277,12 @@ class EncoderCoreDecoder(SatModel):
             hidden_size=hidden_size,
             activation=activation,
             layer_norm=self.layer_norm,
-            use_sat_message_passing=use_sat_message_passing, # 传递flag
+            use_sat_message_passing=use_sat_message_passing,
             mp_heads=mp_heads,
             mp_dropout=mp_dropout
         )
 
+        # Decoder: Input is the output of the core, so this remains unchanged.
         if dec_out_dims is not None:
             self.decoder = GraphNet(
                 core_out_dims,
@@ -277,31 +314,47 @@ class EncoderCoreDecoder(SatModel):
         )
 
     def forward(self, x, edge_index, edge_attr, u, v_indices=None, e_indices=None):
-        # if v_indices and e_indices are both None, then we have only one graph without a batch
         if v_indices is None and e_indices is None:
             v_indices = torch.zeros(x.shape[0], dtype=torch.long, device=x.device)
             e_indices = torch.zeros(
                 edge_attr.shape[0], dtype=torch.long, device=edge_attr.device
             )
 
-        if self.encoder is not None:
-            x, edge_attr, u = self.encoder(
-                x, edge_index, edge_attr, u, v_indices, e_indices
-            )
+        # Encode node features; edge and global features pass through
+        x = self.encoder(x)
 
         latent0 = (x, edge_attr, u)
         latent = self.get_init_state(
             x.shape[0], edge_attr.shape[0], u.shape[0], x.device
         )
         for st in range(self.steps):
-            latent = self.core(
-                torch.cat([latent0[0], latent[0]], dim=1),
-                edge_index,
-                torch.cat([latent0[1], latent[1]], dim=1),
-                torch.cat([latent0[2], latent[2]], dim=1),
-                v_indices,
-                e_indices,
-            )
+            # Prepare input: concatenate initial encoded features with the hidden state from the previous step
+            x_in = torch.cat([latent0[0], latent[0]], dim=1)
+
+            if self.core.use_sat_message_passing:
+                # The new message passing model only updates node features.
+                # We pass the other latent states through the core, which will return them unchanged
+                # thanks to the updated GraphNet.forward logic.
+                latent = self.core(
+                    x_in,
+                    edge_index,
+                    latent[1],      # Pass current edge hidden state
+                    latent[2],      # Pass current global hidden state
+                    v_indices,
+                    e_indices,
+                )
+            else:
+                # The old MLP-based model needs all inputs
+                edge_attr_in = torch.cat([latent0[1], latent[1]], dim=1)
+                u_in = torch.cat([latent0[2], latent[2]], dim=1)
+                latent = self.core(
+                    x_in,
+                    edge_index,
+                    edge_attr_in,
+                    u_in,
+                    v_indices,
+                    e_indices,
+                )
 
         if self.decoder is not None:
             latent = self.decoder(

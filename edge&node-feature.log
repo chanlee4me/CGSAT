@@ -1,1 +1,0 @@
-2025-06-17 21:13:00,232 - INFO - MiniSATEnv.py:182 - Initialized MiniSATEnv with vertex_in_size (after GRU): 34, var_gru_input_dims (handcrafted+embed): 5+16, var_gru_output_dim: 32, clause_gru_input_dims (handcrafted+embed): 15+16, clause_gru_output_dim: 24

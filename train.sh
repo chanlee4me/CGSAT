@@ -16,8 +16,10 @@ python3 dqn.py \
   --logdir /4T/chenli/data/log \
   --env-name sat-v0 \
   --nums-variable 50 \
-  --train-problems-paths /4T/chenli/data/flat75-180/train \
-  --eval-problems-paths /4T/chenli/data/flat100-239/validation \
+  --train-problems-paths /4T/chenli/data/uf50-218/train \
+  --eval-problems-paths /4T/chenli/data/uf50-218/validation \
+  --use_sat_message_passing \
+  --mp_heads 8 \
   --lr 0.00002 \
   --bsize 64 \
   --buffer-size 20000 \
@@ -43,7 +45,7 @@ python3 dqn.py \
   --priority_beta 0.5 \
   --e2v-aggregator sum  \
   --n_hidden 1 \
-  --hidden_size 64 \
+  --hidden_size 128 \
   --decoder_v_out_size 32 \
   --decoder_e_out_size 1 \
   --decoder_g_out_size 1 \

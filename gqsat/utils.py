@@ -198,6 +198,25 @@ def build_argparser():
 
     parser.add_argument("--train-problems-paths", type=str)
 
+    # Arguments for the new SAT Message Passing model
+    parser.add_argument(
+        "--use_sat_message_passing",
+        action="store_true",
+        help="Use the new SAT message passing model instead of the old MLP-based one.",
+    )
+    parser.add_argument(
+        "--mp_heads",
+        type=int,
+        default=4,
+        help="Number of heads for multi-head attention in the message passing model.",
+    )
+    parser.add_argument(
+        "--mp_dropout",
+        type=float,
+        default=0.1,
+        help="Dropout rate for the message passing model.",
+    )
+
     parser.add_argument(
         "--eval-freq",
         default=10000,
