@@ -34,41 +34,9 @@ from torch import nn
 import inspect
 import yaml
 import sys
+
+from .message_passing import SATMessagePassing # 导入新的消息传递模块
 #added by cl 25-2-16
-class GraphNetwork(torch.nn.Module):
-    """
-    替代原ModifiedMetaLayer的模块，实现三阶段处理流程
-    """
-    def __init__(self, edge_model, node_model, global_model):
-        super().__init__()
-        self.edge_model = edge_model
-        self.node_model = node_model
-        self.global_model = global_model
-
-    def forward(
-        self, x, edge_index, edge_attr=None, u=None, v_indices=None, e_indices=None
-    ):
-        row, col = edge_index
-
-        # 边处理阶段
-        if self.edge_model is not None:
-            edge_attr = self.edge_model(
-                x[row], x[col], edge_attr, u, e_indices
-            )
-
-        # 节点处理阶段
-        if self.node_model is not None:
-            x = self.node_model(
-                x, edge_index, edge_attr, u, row, col, v_indices
-            )
-
-        # 全局处理阶段
-        if self.global_model is not None:
-            u = self.global_model(
-                x, edge_attr, u, v_indices, e_indices
-            )
-
-        return x, edge_attr, u
 
 class SatModel(torch.nn.Module):
     def __init__(self, save_name=None):
@@ -131,6 +99,8 @@ def get_mlp(
 
 # 继承自 SatModel 的类，定义了一个GNN
 # GraphNet 可以处理节点、边和全局特征，并通过多层感知机（MLP）进行更新。
+# 继承自 SatModel 的类，定义了一个GNN
+# GraphNet 可以处理节点、边和全局特征，并通过多层感知机（MLP）进行更新。
 class GraphNet(SatModel):
     def __init__(
         self,
@@ -143,118 +113,77 @@ class GraphNet(SatModel):
         hidden_size=64,  # 隐藏层大小
         activation=ReLU,  # 激活函数
         layer_norm=True,  # 是否使用层归一化
+        use_sat_message_passing=False, # 新增flag以切换模型
+        mp_heads=4, # 消息传递模型的参数
+        mp_dropout=0.1
     ):
         super().__init__(save_name)
         self.e2v_agg = e2v_agg
         if e2v_agg not in ["sum", "mean"]:
             raise ValueError("Unknown aggregation function.")
 
-        v_in = in_dims[0]  # 节点输入维度
-        e_in = in_dims[1]  # 边输入维度
-        u_in = in_dims[2]  # 全局输入维度
+        v_in, e_in, u_in = in_dims
+        v_out, e_out, u_out = out_dims
+        self.independent = independent
+        self.use_sat_message_passing = use_sat_message_passing
 
-        v_out = out_dims[0]  # 节点输出维度
-        e_out = out_dims[1]  # 边输出维度
-        u_out = out_dims[2]  # 全局输出维度
+        # Edge Model
+        edge_mlp_in_dim = e_in if independent else e_in + 2 * v_in + u_in
+        self.edge_model = get_mlp(edge_mlp_in_dim, e_out, n_hidden, hidden_size, activation=activation, layer_norm=layer_norm)
 
-        if independent:
-            self.edge_mlp = get_mlp(
-                e_in,
-                e_out,
-                n_hidden,
-                hidden_size,
-                activation=activation,
-                layer_norm=layer_norm,
-            )
-            self.node_mlp = get_mlp(
-                v_in,
-                v_out,
-                n_hidden,
-                hidden_size,
-                activation=activation,
-                layer_norm=layer_norm,
-            )
-            self.global_mlp = get_mlp(
-                u_in,
-                u_out,
-                n_hidden,
-                hidden_size,
-                activation=activation,
-                layer_norm=layer_norm,
+        # Node Model
+        if self.use_sat_message_passing:
+            # The new message passing model handles its own logic
+            self.node_model = SATMessagePassing(
+                in_channels=v_in,
+                out_channels=v_out,
+                heads=mp_heads,
+                dropout=mp_dropout
             )
         else:
-            self.edge_mlp = get_mlp(
-                e_in + 2 * v_in + u_in,
-                e_out,
-                n_hidden,
-                hidden_size,
-                activation=activation,
-                layer_norm=layer_norm,
-            )
-            self.node_mlp = get_mlp(
-                v_in + e_out + u_in,
-                v_out,
-                n_hidden,
-                hidden_size,
-                activation=activation,
-                layer_norm=layer_norm,
-            )
-            self.global_mlp = get_mlp(
-                u_in + v_out + e_out,
-                u_out,
-                n_hidden,
-                hidden_size,
-                activation=activation,
-                layer_norm=layer_norm,
-            )
+            # The old MLP-based model
+            node_mlp_in_dim = v_in if independent else v_in + e_out + u_in
+            self.node_model = get_mlp(node_mlp_in_dim, v_out, n_hidden, hidden_size, activation=activation, layer_norm=layer_norm)
 
-        self.independent = independent
+        # Global Model
+        global_mlp_in_dim = u_in if independent else u_in + v_out + e_out
+        self.global_model = get_mlp(global_mlp_in_dim, u_out, n_hidden, hidden_size, activation=activation, layer_norm=layer_norm)
 
-        def edge_model(src, dest, edge_attr, u=None, e_indices=None):
-            # source, target: [E, F_x], where E is the number of edges.
-            # edge_attr: [E, F_e]
+    def forward(self, x, edge_index, edge_attr=None, u=None, v_indices=None, e_indices=None):
+        row, col = edge_index
+
+        # 1. Edge Update
+        if self.edge_model is not None:
+            edge_attr_in = edge_attr if self.independent else torch.cat([x[row], x[col], edge_attr, u[e_indices]], 1)
+            edge_attr = self.edge_model(edge_attr_in)
+
+        # 2. Node Update
+        if self.node_model is not None:
+            if self.use_sat_message_passing:
+                # The new model expects (x, edge_index) and handles V2C/C2V internally
+                x = self.node_model(x, edge_index)
+            else:
+                # Old model logic
+                if self.e2v_agg == "sum":
+                    agg_e = scatter_add(edge_attr, col, dim=0, dim_size=x.size(0))
+                else: # "mean"
+                    agg_e = scatter_mean(edge_attr, col, dim=0, dim_size=x.size(0))
+
+                x_in = x if self.independent else torch.cat([x, agg_e, u[v_indices]], dim=1)
+                x = self.node_model(x_in)
+
+        # 3. Global Update
+        if self.global_model is not None:
             if self.independent:
-                return self.edge_mlp(edge_attr) # 独立模式仅处理边特征
-            # 依赖模式拼接源节点、目标节点、边和全局特征
-            out = torch.cat([src, dest, edge_attr, u[e_indices]], 1)
-            return self.edge_mlp(out)
-        #added by cl 25-2-16
-        # 修改node_model以适配新参数
-        def node_model(x, edge_index, edge_attr, u, row, col, v_indices=None):
-            if self.independent:
-                return self.node_mlp(x) # 独立模式仅处理节点特征
-            # 根据聚合方式(求和或平均)聚合边信息
-            # 使用传入的row进行聚合
-            if self.e2v_agg == "sum":
-                agg_out = scatter_add(edge_attr, row, dim=0, dim_size=x.size(0))
-            elif self.e2v_agg == "mean":
-                agg_out = scatter_mean(edge_attr, row, dim=0, dim_size=x.size(0))
-            # 拼接节点特征、聚合边信息和全局特征
-            out = torch.cat([x, agg_out, u[v_indices]], dim=1)
-            return self.node_mlp(out)
+                u_in = u
+            else:
+                # Aggregate node and edge features for the global update
+                agg_v = scatter_mean(x, v_indices, dim=0)
+                agg_e = scatter_mean(edge_attr, e_indices, dim=0)
+                u_in = torch.cat([u, agg_v, agg_e], dim=1)
+            u = self.global_model(u_in)
 
-        def global_model(x, edge_attr, u, v_indices, e_indices):
-            if self.independent:
-                return self.global_mlp(u) # 独立模式仅处理全局特征
-            # 拼接全局特征、平均节点特征和平均边特征
-            out = torch.cat(
-                [
-                    u,
-                    scatter_mean(x, v_indices, dim=0),
-                    scatter_mean(edge_attr, e_indices, dim=0),
-                ],
-                dim=1,
-            )
-            return self.global_mlp(out)
-        #added by cl 25-2-16 
-        #使用新的GraphNetwork替代ModifiedMetaLayer（# 使用GraphNetwork组合三个模型）
-        self.op = GraphNetwork(edge_model, node_model, global_model)
-
-    def forward(
-        self, x, edge_index, edge_attr=None, u=None, v_indices=None, e_indices=None
-    ):
-        # 前向传播:依次处理边、节点和全局特征
-        return self.op(x, edge_index, edge_attr, u, v_indices, e_indices)
+        return x, edge_attr, u
 
 # 图神经网络结构，包括编码器、核心和解码器三个部分。它可以用来处理图数据中的复杂变换。
 class EncoderCoreDecoder(SatModel):
@@ -272,6 +201,9 @@ class EncoderCoreDecoder(SatModel):
         hidden_size=64,
         activation=ReLU,
         independent_block_layers=1,
+        use_sat_message_passing=False, # 新增flag
+        mp_heads=4,
+        mp_dropout=0.1
     ):
         super().__init__(save_name)
         # all dims are tuples with (v,e) feature sizes
@@ -309,6 +241,9 @@ class EncoderCoreDecoder(SatModel):
             hidden_size=hidden_size,
             activation=activation,
             layer_norm=self.layer_norm,
+            use_sat_message_passing=use_sat_message_passing, # 传递flag
+            mp_heads=mp_heads,
+            mp_dropout=mp_dropout
         )
 
         if dec_out_dims is not None:
