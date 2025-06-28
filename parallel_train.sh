@@ -2,7 +2,7 @@
 
 # Define the GPU allocation strategy
 GPUS=(0 1)  # Use two GPUs
-SEEDS=(11 12 13 14 15 25 26 27 28 29)  # 8 different seeds
+SEEDS=(11 12 13 14) # Train 4 models (2 per GPU) with different seeds
 
 # Ensure the logs directory exists
 mkdir -p /4T/chenli/data/log/logs
@@ -11,8 +11,10 @@ mkdir -p /4T/chenli/data/log/logs
 BASE_CMD="--logdir /4T/chenli/data/log \
   --env-name sat-v0 \
   --nums-variable 50 \
-  --train-problems-paths /4T/chenli/data/flat75-180/train \
-  --eval-problems-paths /4T/chenli/data/flat100-239/validation \
+  --train-problems-paths /4T/chenli/data/uf50-218/train \
+  --eval-problems-paths /4T/chenli/data/uf50-218/validation \
+  --use_sat_message_passing \
+  --mp_heads 8 \
   --lr 0.00002 \
   --bsize 64 \
   --buffer-size 20000 \
@@ -38,7 +40,7 @@ BASE_CMD="--logdir /4T/chenli/data/log \
   --priority_beta 0.5 \
   --e2v-aggregator sum  \
   --n_hidden 1 \
-  --hidden_size 64 \
+  --hidden_size 128 \
   --decoder_v_out_size 32 \
   --decoder_e_out_size 1 \
   --decoder_g_out_size 1 \
@@ -57,15 +59,21 @@ BASE_CMD="--logdir /4T/chenli/data/log \
   --lr_scheduler_frequency 3000 \
   --independent_block_layers 0"
 
-# Launch tasks (each GPU runs 4 tasks)
+# Launch tasks (each GPU runs 2 tasks)
 for i in "${!SEEDS[@]}"; do
-    # Determine the GPU index (the first four seeds to GPU0, the rest to GPU1)
-    GPU_IDX=$((i / 5))
+    # Determine the GPU index (2 tasks per GPU)
+    GPU_IDX=$((i / 2))
     SEED=${SEEDS[$i]}
 
     # Run the training process with the current seed; the dqn.py script will create its own timestamped log subdirectory.
     CUDA_VISIBLE_DEVICES=${GPUS[$GPU_IDX]} \
     nohup python3 dqn.py $BASE_CMD --seed $SEED > /4T/chenli/data/log/logs/seed${SEED}.log 2>&1 &
+    
+    echo "Started training with seed $SEED on GPU ${GPUS[$GPU_IDX]}"
 done
 
-echo "Launched ${#SEEDS[@]} tasks. GPU0 runs seeds ${SEEDS[0]} - ${SEEDS[3]}, GPU1 runs seeds ${SEEDS[4]} - ${SEEDS[7]}."
+echo "Launched ${#SEEDS[@]} tasks. GPU0 runs seeds ${SEEDS[0]} and ${SEEDS[1]}, GPU1 runs seeds ${SEEDS[2]} and ${SEEDS[3]}."
+
+# Wait for all background processes to complete
+wait
+echo "All training tasks completed."

@@ -14,7 +14,7 @@
 
 import torch
 import numpy as np
-from minisat.minisat.gym.MiniSATEnv import VAR_ID_IDX
+from minisat.minisat.gym.MiniSATEnv import VAR_ID_IDX, NODE_TYPE_COL, NODE_TYPE_VAR
 from collections import deque
 
 
@@ -84,7 +84,8 @@ class GraphAgent:
             udata = torch.tensor(udata, device=self.device)
             conn = torch.tensor(conn, device=self.device)
             vout, eout, _ = self.net(x=vdata, edge_index=conn, edge_attr=edata, u=udata)
-            res = vout[vdata[:, VAR_ID_IDX] == 1]# vout 是节点的输出，最后选取符合条件的节点
+            # 选择变量节点的输出（节点类型为 NODE_TYPE_VAR）
+            res = vout[vdata[:, NODE_TYPE_COL] == NODE_TYPE_VAR]
 
             if self.debug:
                 self.qs_buffer.append(res.flatten().cpu().numpy())
@@ -92,40 +93,58 @@ class GraphAgent:
 
     # 根据 epsilon-greedy 策略决定智能体采取的动作
     def act(self, hist_buffer, eps):
-        # If action pool enabled (only in evaluation), try pool
-        if self.pool_enabled:
-            # refill pool if empty
+        # 评估模式且动作池启用时，使用动作池策略
+        if self.pool_enabled and not self.net.training:
             if not self.action_pool:
                 qs = self.forward(hist_buffer)
-                flat_qs = qs.flatten()
-                # get top-K actions
-                topk = torch.topk(flat_qs, min(self.pool_size, flat_qs.numel())).indices.tolist()
-                self.action_pool = deque(topk)
-            # pop and return first valid action
+                if qs.numel() > 0:
+                    flat_qs = qs.flatten()
+                    topk_k = min(self.pool_size, flat_qs.numel())
+                    topk_indices = torch.topk(flat_qs, topk_k).indices.tolist()
+                    self.action_pool.extend(topk_indices)
+            # 弹出动作并检查其有效性
             while self.action_pool:
-                action = self.action_pool.popleft()
-                if self._check_valid(hist_buffer[-1], action):
-                    return int(action)
-            # if pool exhausted or no valid actions, fall through to default
-        # epsilon-greedy fallback
+                candidate = self.action_pool.popleft()
+                if self._check_valid(hist_buffer[-1], candidate):
+                    return candidate
+
+        # 训练模式或动作池被禁用/耗尽时，使用标准的 epsilon-greedy 策略
         if np.random.random() < eps:
-            vars_to_decide = np.where(hist_buffer[-1][0][:, VAR_ID_IDX] == 1)[0]
-            acts = [a for v in vars_to_decide for a in (v * 2, v * 2 + 1)]
-            return int(np.random.choice(acts))
+            # 随机选择一个动作
+            vfeat = hist_buffer[-1][0]
+            # 找到所有变量节点（节点类型为 NODE_TYPE_VAR）
+            unassigned_vars_mask = vfeat[:, NODE_TYPE_COL] == NODE_TYPE_VAR
+            unassigned_var_indices = np.where(unassigned_vars_mask)[0]
+
+            if len(unassigned_var_indices) == 0:
+                return -1 # 没有可选择的动作，让 MiniSat 决策
+
+            # 从所有未赋值变量中随机选择一个，然后随机选择极性
+            rand_var_idx = np.random.randint(0, len(unassigned_var_indices))  # 在变量列表中的索引
+            random_polarity = np.random.randint(0, 2)  # 0 或 1 (负极性或正极性)
+            action = rand_var_idx * 2 + random_polarity  # 编码为动作
+            return int(action)
         else:
+            # 贪心选择：计算 Q 值并选择最优动作
             qs = self.forward(hist_buffer)
+            if qs.numel() == 0:
+                return -1 # 没有可选择的动作
             return self.choose_actions(qs)
 
     def _check_valid(self, obs, action):
-        # Map flat action to variable index and check if variable still unassigned
-        # obs[0] is vertex features array; VAR_ID_IDX marks variable nodes
-        vfeat = obs[0]
-        # determine current variable nodes
-        var_mask = vfeat[:, VAR_ID_IDX] == 1
-        # number of variables available
-        num_vars = int(np.sum(var_mask))
-        var_idx = action // 2
-        return 0 <= var_idx < num_vars
+        # 检查动作是否对应一个当前未赋值的变量
+        vfeat = obs[0]  # vertex features
+        
+        # 找到所有变量节点（节点类型为 NODE_TYPE_VAR）
+        var_mask = vfeat[:, NODE_TYPE_COL] == NODE_TYPE_VAR
+        num_vars_in_graph = var_mask.sum()
+        
+        # 简化的检查：动作索引直接对应图中的变量节点
+        # action // 2 应该对应图中第几个变量节点
+        action_var_idx = action // 2
+        
+        # 检查动作变量索引是否在有效范围内
+        return action_var_idx < num_vars_in_graph
 
     def choose_actions(self, qs):
         return qs.flatten().argmax().item()

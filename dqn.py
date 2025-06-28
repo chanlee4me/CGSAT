@@ -405,9 +405,9 @@ if __name__ == "__main__":
                         writer.add_scalar(k, v, learner.step_ctr - 1)
 
                     # 如果是评估模式，则在评估完成后退出
-                    if args.eval:
-                        print("Evaluation is done, exiting now.")
-                        exit(0)
+                    # if args.eval:
+                    #     print("Evaluation is done, exiting now.")
+                    #     exit(0)
                 # 记录学习步骤信息到 TensorBoard。
                 for k, v in step_info.items():
                     writer.add_scalar(k, v, learner.step_ctr - 1)

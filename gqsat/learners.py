@@ -16,7 +16,7 @@ from torch import nn
 from torch_scatter import scatter_max
 import torch
 from torch.optim.lr_scheduler import StepLR
-from minisat.minisat.gym.MiniSATEnv import VAR_ID_IDX
+from minisat.minisat.gym.MiniSATEnv import VAR_ID_IDX, NODE_TYPE_COL, NODE_TYPE_VAR
 
 # 通过GNN进行强化学习中的 Q 值更新。
 # 它使用经验回放来采样状态转移，并通过优化器和目标网络计算目标 Q 值
@@ -69,7 +69,7 @@ class GraphLearner:
             e_indices=states[5],   # 边索引（用于恢复批次结构）
             u=states[6]           # 全局特征（形状：[batch_size, global_feature_dim]）
         )
-        return vout[states[0][:, VAR_ID_IDX] == 1], states[3] # 返回可行动作对应的 Q 值
+        return vout[states[0][:, NODE_TYPE_COL] == NODE_TYPE_VAR], states[3] # 返回可行动作对应的 Q 值
     # 根据目标网络计算目标 Q 值
     def get_target_qs(self, states):
         # 目标网络前向传播：结构与主网络相同，但输出需分离梯度（detach）
@@ -81,7 +81,7 @@ class GraphLearner:
             e_indices=states[5],
             u=states[6],
         )
-        return vout[states[0][:, VAR_ID_IDX] == 1].detach(), states[3] # 返回可行动作对应的 Q 值
+        return vout[states[0][:, NODE_TYPE_COL] == NODE_TYPE_VAR].detach(), states[3] # 返回可行动作对应的 Q 值
     # 训练步骤
     def step(self):
         # 1、从缓冲区采样一个批次大小的数据

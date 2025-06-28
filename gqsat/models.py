@@ -296,8 +296,9 @@ class EncoderCoreDecoder(SatModel):
 
         pre_out_dims = core_out_dims if self.decoder is None else dec_out_dims
 
+        # 解码器的输入维度变为两倍，因为它拼接了节点自身特征和全局上下文向量
         self.vertex_out_transform = (
-            Lin(pre_out_dims[0], out_dims[0]) if out_dims[0] is not None else None
+            Lin(pre_out_dims[0] * 2, out_dims[0]) if out_dims[0] is not None else None
         )
         self.edge_out_transform = (
             Lin(pre_out_dims[1], out_dims[1]) if out_dims[1] is not None else None
@@ -314,13 +315,16 @@ class EncoderCoreDecoder(SatModel):
         )
 
     def forward(self, x, edge_index, edge_attr, u, v_indices=None, e_indices=None):
+        # 1. 从原始输入中获取变量节点的掩码，以备解码阶段使用
+        var_mask = x[:, NODE_TYPE_COL] == NODE_TYPE_VAR
+
         if v_indices is None and e_indices is None:
             v_indices = torch.zeros(x.shape[0], dtype=torch.long, device=x.device)
             e_indices = torch.zeros(
                 edge_attr.shape[0], dtype=torch.long, device=edge_attr.device
             )
 
-        # Encode node features; edge and global features pass through
+        # 2. 编码节点特征；边和全局特征直接通过
         x = self.encoder(x)
 
         latent0 = (x, edge_attr, u)
@@ -328,23 +332,19 @@ class EncoderCoreDecoder(SatModel):
             x.shape[0], edge_attr.shape[0], u.shape[0], x.device
         )
         for st in range(self.steps):
-            # Prepare input: concatenate initial encoded features with the hidden state from the previous step
+            # 准备输入：将初始编码特征与上一步的隐藏状态拼接
             x_in = torch.cat([latent0[0], latent[0]], dim=1)
 
             if self.core.use_sat_message_passing:
-                # The new message passing model only updates node features.
-                # We pass the other latent states through the core, which will return them unchanged
-                # thanks to the updated GraphNet.forward logic.
                 latent = self.core(
                     x_in,
                     edge_index,
-                    latent[1],      # Pass current edge hidden state
-                    latent[2],      # Pass current global hidden state
+                    latent[1],      # 传递当前的边隐藏状态
+                    latent[2],      # 传递当前的全局隐藏状态
                     v_indices,
                     e_indices,
                 )
             else:
-                # The old MLP-based model needs all inputs
                 edge_attr_in = torch.cat([latent0[1], latent[1]], dim=1)
                 u_in = torch.cat([latent0[2], latent[2]], dim=1)
                 latent = self.core(
@@ -361,10 +361,31 @@ class EncoderCoreDecoder(SatModel):
                 latent[0], edge_index, latent[1], latent[2], v_indices, e_indices
             )
 
+        # --- 上下文感知解码 ---
+        final_v_features = latent[0]
+
+        # 3. 从所有变量节点计算全局上下文向量
+        var_features = final_v_features[var_mask]
+
+        # 安全检查：如果图中没有变量节点，则使用零向量作为上下文
+        if var_features.shape[0] == 0:
+            global_context_vector = torch.zeros(u.shape[0], final_v_features.shape[1], device=x.device)
+        else:
+            var_batch_indices = v_indices[var_mask]
+            # 使用 scatter_mean 计算每个图中所有变量特征的均值
+            global_context_vector = scatter_mean(var_features, var_batch_indices, dim=0, dim_size=u.shape[0])
+        
+        # 4. 将计算出的上下文向量扩展，以便与每个节点的自身特征进行拼接
+        expanded_context = global_context_vector[v_indices]
+        
+        # 5. 创建拼接后的增强特征向量
+        augmented_v_features = torch.cat([final_v_features, expanded_context], dim=1)
+        
+        # 6. 将增强后的特征传入最终的变换层以计算输出
         v_out = (
-            latent[0]
+            augmented_v_features
             if self.vertex_out_transform is None
-            else self.vertex_out_transform(latent[0])
+            else self.vertex_out_transform(augmented_v_features)
         )
         e_out = (
             latent[1]

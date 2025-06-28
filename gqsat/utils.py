@@ -16,7 +16,7 @@
 import argparse
 import torch
 import numpy as np
-from minisat.minisat.gym.MiniSATEnv import VAR_ID_IDX
+from minisat.minisat.gym.MiniSATEnv import VAR_ID_IDX, NODE_TYPE_COL, NODE_TYPE_VAR
 import time
 import pickle
 from collections import deque
@@ -416,7 +416,7 @@ def batch_graphs(graphs, device):
     edge_sizes = torch.tensor([el[1].shape[0] for el in graphs], dtype=torch.long)
     vcumsize = np.cumsum(vertex_sizes)
     variable_nodes_sizes = torch.tensor(
-        [el[0][el[0][:, VAR_ID_IDX] == 1].shape[0] for el in graphs],
+        [el[0][el[0][:, NODE_TYPE_COL] == NODE_TYPE_VAR].shape[0] for el in graphs],
         dtype=torch.long,
         device=device,
     )

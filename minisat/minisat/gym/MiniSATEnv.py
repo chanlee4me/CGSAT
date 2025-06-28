@@ -401,7 +401,9 @@ class gym_sat_Env(gym.Env):
                 decision = 0 - int(decision / 2 + 1)
 
             # if (decision == MINISAT_DECISION_CONSTANT) or orig_decision in action_set:
+            old_conflicts = self.S.getNumConflicts()
             self.S.step(decision)
+            new_conflicts = self.S.getNumConflicts()
             # else:
             #    raise ValueError("Illegal action")
 
@@ -421,7 +423,10 @@ class gym_sat_Env(gym.Env):
             # since GQSAT hasn't solved the problem
             step_reward = -self.penalty_size
         else:
-            step_reward = 0 if self.isSolved else -self.penalty_size
+            # 基于冲突增量的密集奖励 (新逻辑：冲突越多奖励越高)
+            conflict_increase = new_conflicts - old_conflicts
+            # 如果未解决，除了密集奖励外，再加一个小的惩罚项
+            step_reward = conflict_increase if self.isSolved else conflict_increase - self.penalty_size
         return (
             #added by cl
             #TODO 看下curr_state是什么样的，然后修改初始的observation_space

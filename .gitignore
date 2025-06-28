@@ -3,3 +3,4 @@ gqsat/__pycache__/agents.cpython-311.pyc
 gqsat/__pycache__/utils.cpython-311.pyc
 gqsat/__pycache__/models.cpython-311.pyc
 minisat/minisat/gym/__pycache__/MiniSATEnv.cpython-311.pyc
+*.log

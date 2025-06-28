@@ -45,6 +45,7 @@ public:
 	std::vector<int>* getAssignments();
 	std::vector<double>* getActivities();
     std::vector<std::vector<int> >* getClauses();
+	int getNumConflicts();
 };
 
 }

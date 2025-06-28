@@ -94,3 +94,7 @@ std::vector<std::vector<int> >* GymSolver::getClauses() {
 std::vector<double>* GymSolver::getActivities() {
     return &S.env_state_activities;
 }
+
+int GymSolver::getNumConflicts() {
+    return S.conflicts;
+}
