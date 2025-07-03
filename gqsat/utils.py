@@ -501,6 +501,7 @@ def evaluate(agent, args, include_train_set=False):
         )
 
     res = {} # 存储最终结果
+    solving_times_result = {} # 存储每个问题集的求解时间
 
     st_time = time.time() # 记录开始时间用于超时判断
     print("Starting evaluation. Fasten your seat belts!")
@@ -553,6 +554,7 @@ def evaluate(agent, args, include_train_set=False):
             f"iters frac: {total_iters_minisat/total_iters_ours:.2f}"
         )
         res[pset] = scores # 汇总结果存入 res
+        solving_times_result[pset] = walltime # 保存求解时间数据
 
     if args.dump_timings_path:# 如果需要，将解题时间序列化保存
         target_fname = (
@@ -574,5 +576,5 @@ def evaluate(agent, args, include_train_set=False):
             "mean_score": np.mean([el for el in scores.values()]),
             "median_score": np.median([el for el in scores.values()]),
         },
-        False,
+        solving_times_result,  # 返回求解时间数据
     )
