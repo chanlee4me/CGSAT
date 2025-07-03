@@ -88,18 +88,41 @@ if __name__ == "__main__":
     agent = GraphAgent(net, args)
 
     st_time = time.time()
-    scores, eval_metadata, _ = evaluate(agent, args)
+    scores, eval_metadata, solving_times = evaluate(agent, args)
     end_time = time.time()
 
     # 保存评估结果到pickle文件
     pickle_path = os.path.join(eval_args.logdir, "eval_results.pkl")
     with open(pickle_path, "wb") as f:
         pickle.dump(scores, f)
+    
+    # 保存CNF求解时间数据到单独文件
+    solving_times_path = os.path.join(eval_args.logdir, "cnf_solving_times.pkl")
+    with open(solving_times_path, "wb") as f:
+        pickle.dump(solving_times, f)
+    
+    # 计算纯CNF求解时间统计
+    all_solving_times = []
+    for pset_times in solving_times.values():
+        all_solving_times.extend(pset_times.values())
+    
+    total_cnf_solving_time = sum(all_solving_times)
+    avg_cnf_solving_time = np.mean(all_solving_times) if all_solving_times else 0
+    median_cnf_solving_time = np.median(all_solving_times) if all_solving_times else 0
+    num_cnf_problems = len(all_solving_times)
         
     # 记录模型信息
     log_print(log_file, f"Model directory: {args.model_dir}")
     log_print(log_file, f"Model checkpoint: {args.model_checkpoint}")
     log_print(log_file, f"Evaluation is over. It took {end_time - st_time:.2f} seconds for the whole procedure")
+    
+    # 记录CNF求解时间统计
+    log_print(log_file, f"\n=== CNF求解时间统计 ===")
+    log_print(log_file, f"测试的CNF问题总数: {num_cnf_problems}")
+    log_print(log_file, f"所有CNF文件总求解时间: {total_cnf_solving_time:.2f} 秒")
+    log_print(log_file, f"平均每个CNF文件求解时间: {avg_cnf_solving_time:.2f} 秒")
+    log_print(log_file, f"CNF文件求解时间中位数: {median_cnf_solving_time:.2f} 秒")
+    log_print(log_file, f"详细求解时间数据已保存到: {solving_times_path}")
     
     highest_relative_score = -float('inf')
 

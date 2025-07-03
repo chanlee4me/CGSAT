@@ -20,7 +20,7 @@ python3 evaluate.py \
   --eval-time-limit 100000000000000 \
   --no_restarts \
   --test_time_max_decisions_allowed 500 \
-  --eval-problems-paths /4T/chenli/data/uf50-218/test \
+  --eval-problems-paths /4T/chenli/data/uf100-430/test \
   --model-dir /4T/chenli/data/log/seed11_2025-06-26_19-47-19\
   --model-checkpoint model_1000.chkp \
   --action-pool-size 5
